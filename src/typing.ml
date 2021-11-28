@@ -5,17 +5,42 @@ open Ast
 open Tast
 
 let debug = ref false
+let found_main = ref false
 let fmt_used = ref false
 let fmt_imported = ref false
 
 let dummy_loc = Lexing.dummy_pos, Lexing.dummy_pos
 exception Error of Ast.location * string
 
+let rec printable_type = function
+  | Tint -> "int"
+  | Tbool -> "bool"
+  | Tstring -> "string"
+  | Tstruct structure -> structure.s_name
+  | Tptr typ -> "*" ^ (printable_type typ)
+  (* TODO fix Tmany representation *)
+  | Tmany _ -> "TMANY"
+
+let type_error_message expected received =
+  "This expression has type '" ^ (printable_type received)
+  ^ "' but an expression of type '" ^ (printable_type expected) ^ "' was expected"
+
 (* context types *)
 type struct_env = structure M.t
 type fun_env = function_ M.t
 
 
+
+(* associate precise type if valid in a given structure context *)
+(* replacement for the original 'type_type' function *)
+let rec find_type structures = function
+  | PTptr ptyp -> Tptr (find_type structures ptyp)
+  | PTident {id = "int"; loc} -> Tint
+  | PTident {id = "bool"; loc} -> Tbool
+  | PTident {id = "string"; loc} -> Tstring
+  | PTident {id; loc} -> if M.mem id structures
+      then Tstruct (M.find id structures)
+      else raise (Error (loc, "unknown type '" ^ id ^ "'"))
 
 let rec eq_type ty1 ty2 = match ty1, ty2 with
   | Tint, Tint | Tbool, Tbool | Tstring, Tstring -> true
@@ -24,7 +49,22 @@ let rec eq_type ty1 ty2 = match ty1, ty2 with
   | _ -> false
     (* TODO autres types *)
 
+let argument_call_correspondance ({expr_typ}, loc) {v_typ} =
+    if not (eq_type expr_typ v_typ)
+      then raise (Error (loc, type_error_message v_typ expr_typ))
 
+let rec lvalue_test {expr_desc} = match expr_desc with
+  | TEdot (e, x) -> lvalue_test e
+  | TEident _ -> true
+  | TEunop (Ustar, _) -> true
+  | _ -> false
+
+let is_well_formed = function
+  | {expr_typ=Tmany _} -> false
+  | _ -> true
+
+
+(* expression associated with a variable *)
 let evar v = { expr_desc = TEident v; expr_typ = v.v_typ }
 
 let new_var =
@@ -38,6 +78,8 @@ module Env = struct
   type t = var M.t
   let empty = M.empty
   let find = M.find
+  let find_opt = M.find_opt
+  let mem = M.mem
   let add env v = M.add v.v_name v env
 
   let all_vars = ref []
@@ -45,7 +87,6 @@ module Env = struct
     let check v =
       if v.v_name <> "_" && (* TODO used *) true then raise (Error (v.v_loc, "unused variable")) in
     List.iter check !all_vars
-
 
   let var x loc ?used ty env =
     let v = new_var x loc ?used ty in
@@ -57,53 +98,125 @@ end
 
 let tvoid = Tmany []
 let make d ty = { expr_desc = d; expr_typ = ty }
-let stmt d = make d tvoid (* statement *)
+let stmt d = {expr_desc=d; expr_typ=tvoid} (* statement *)
 
-let rec expr env e =
- let e, ty, rt = expr_desc env e.pexpr_loc e.pexpr_desc in
+
+(* types an expression and indicates whether it returns something *)
+let rec expr s f env e =
+ let e, ty, rt = expr_desc s f env e.pexpr_loc e.pexpr_desc in
   { expr_desc = e; expr_typ = ty }, rt
 
-(* à un environnement, une localisation, une expression
-   associe: une expression typée (epxr_desc), un type d'expression (typ),
-   et si oui ou non l'expression renvoie quelque chose *)
-and expr_desc env loc = function
-  | PEskip ->
-     TEskip, tvoid, false
-  | PEconstant c -> begin
-      match c with
+and expr_desc s f env loc = function
+  | PEskip -> TEskip, tvoid, false
+
+  | PEconstant c -> begin match c with
       | Cint _ -> TEconstant c, Tint, false
       | Cstring _ -> TEconstant c, Tstring, false
       | Cbool _ -> TEconstant c, Tbool, false
     end
+
   | PEbinop (op, e1, e2) ->
-    (* TODO TODO TODO *) assert false
+      let e1', _ = expr s f env e1 and e2', _ = expr s f env e2 in
+      let {expr_desc=d1; expr_typ=t1} = e1' and {expr_desc=d2; expr_typ=t2} = e2' in
+      begin match op with
+      | Badd | Bsub | Bmul | Bdiv | Bmod ->
+          begin match t1, t2 with
+            | Tint, Tint -> TEbinop (op, e1', e2'), Tint, false
+            | Tint, _ -> raise (Error (e2.pexpr_loc, type_error_message Tint t2))
+            | _, _ -> raise (Error (e1.pexpr_loc, type_error_message Tint t1))
+          end
+      | Beq | Bne -> if d1 = TEnil || d2 = TEnil || eq_type t1 t2
+          then TEbinop (op, e1', e2'), Tbool, false
+          else raise (Error (loc, "expressions do not have the same type"))
+      | Blt | Ble | Bgt | Bge ->
+          begin match t1, t2 with
+            | Tint, Tint -> TEbinop (op, e1', e2'), Tbool, false
+            | Tint, _ -> raise (Error (e2.pexpr_loc, type_error_message Tint t2))
+            | _, _ -> raise (Error (e1.pexpr_loc, type_error_message Tint t1))
+          end
+      | Band | Bor ->
+          begin match t1, t2 with
+            | Tbool, Tbool -> TEbinop (op, e1', e2'), Tbool, false
+            | Tbool, _ -> raise (Error (e2.pexpr_loc, type_error_message Tbool t2))
+            | _, _ -> raise (Error (e1.pexpr_loc, type_error_message Tbool t1))
+          end
+      end
+    
   | PEunop (Uamp, e1) ->
-    (* TODO *) assert false
+      let e1', _ = expr s f env e1 in if lvalue_test e1'
+        then TEunop (Uamp, e1'), Tptr e1'.expr_typ, false
+        else raise (Error (e1.pexpr_loc, "lvalue required as operand of '&'"))
+      
   | PEunop (Uneg | Unot | Ustar as op, e1) ->
-    (* TODO *) assert false
+      let e1', _ = expr s f env e1 in begin match op, e1'.expr_typ, e1'.expr_desc with
+        | Uneg, Tint, _ -> TEunop (Uneg, e1'), Tint, false
+        | Unot, Tbool, _ -> TEunop (Unot, e1'), Tbool, false
+        | Ustar, Tptr _, TEnil -> raise (Error (e1.pexpr_loc, "cannot derefence nil"))
+        | Ustar, Tptr t, _ -> TEunop (Ustar, e1'), t, false
+        | _ -> raise (Error (e1.pexpr_loc, "cannot dereference this"))
+      end
+
   | PEcall ({id = "fmt.Print"}, el) ->
-    (* TODO *) TEprint [], tvoid, false
-  | PEcall ({id="new"}, [{pexpr_desc=PEident {id}}]) ->
-     let ty = match id with
-       | "int" -> Tint | "bool" -> Tbool | "string" -> Tstring
-       | _ -> (* TODO *) raise (Error (loc, "no such type " ^ id)) in
-     TEnew ty, Tptr ty, false
-  | PEcall ({id="new"}, _) ->
-     raise (Error (loc, "new expects a type"))
-  | PEcall (id, el) ->
-     (* TODO *) assert false
+      let el' = List.map (fun e ->
+        let e', _ = expr s f env e in if is_well_formed e'
+          then e'
+          else raise (Error (e.pexpr_loc, "this is not a correct expression, it cannot be printed"))
+      ) el in
+      TEprint el', tvoid, false
+
+  | PEcall ({id="new"}, [{pexpr_desc=PEident ident}]) ->
+      let t = find_type s (PTident ident) in TEnew t, Tptr t, false
+  | PEcall ({id="new"}, _) -> raise (Error (loc, "new expects a type"))
+
+  | PEcall ({id; loc}, el) -> if M.mem id f
+      then begin
+        let callee = M.find id f in
+        let el_with_loc = List.map (fun e -> (fst (expr s f env e), e.pexpr_loc)) el in
+        List.iter2 argument_call_correspondance el_with_loc callee.fn_params;
+        let el' = fst (List.split el_with_loc) in
+        TEcall (callee, el'), Tmany callee.fn_typ, false
+      end
+      else raise (Error (loc, "unknown function '" ^ id ^ "'"))     
+
   | PEfor (e, b) ->
-     (* TODO *) assert false
-  | PEif (e1, e2, e3) ->
-     (* TODO *) assert false
-  | PEnil ->
-     (* TODO *) assert false
-  | PEident {id=id} ->
-     (* TODO *) (try let v = Env.find id env in TEident v, v.v_typ, false
-      with Not_found -> raise (Error (loc, "unbound variable " ^ id)))
-  | PEdot (e, id) ->
-     (* TODO *) assert false
+      let e', _ = expr s f env e and b', _ = expr s f env b in
+      begin match e'.expr_desc, b'.expr_typ with
+        | TEblock _, Tbool -> TEfor (e', b'), tvoid, false
+        | _, Tbool -> raise (Error (loc, "syntax error"))
+        | _, _ -> raise (Error (b.pexpr_loc, type_error_message Tbool b'.expr_typ))
+      end
+
+  | PEif (b, e1, e2) ->
+      let e1', rt1 = expr s f env e1
+      and e2', rt2 = expr s f env e2
+      and b', _ = expr s f env b in
+      begin match b'.expr_typ, e1'.expr_desc, e2'.expr_desc with
+        | Tbool, TEblock _, TEblock _ -> TEif (b', e1', e2'), tvoid, rt1 && rt2
+        | Tbool, _, _ -> raise (Error (loc, "syntax error"))
+        | _, _, _ -> raise (Error (b.pexpr_loc, type_error_message Tbool b'.expr_typ))
+      end
+
+  | PEnil -> TEnil, tvoid, false
+      
+  | PEident {id} -> begin match Env.find_opt id env with
+      | Some v -> TEident v, v.v_typ, false
+      | None -> raise (Error (loc, "unknown function '" ^ id ^ "'"))
+    end
+
+  | PEdot (e, {id; loc=id_loc}) ->
+      let e', _ = expr s f env e in begin match e'.expr_typ with
+        | Tptr (Tstruct structure) | Tstruct structure ->
+            begin match Hashtbl.find_opt structure.s_fields id with
+              | Some field -> TEdot (e', field), field.f_typ, false
+              | None -> raise (Error (id_loc, "structure '" ^ structure.s_name
+                  ^ "' has no field named '" ^ id ^ "'"))
+            end
+        | _ -> raise (Error (e.pexpr_loc,
+            "this is not a valid structure nor a pointer to a structure"))
+      end
+
   | PEassign (lvl, el) ->
+      
      (* TODO *) TEassign ([], []), tvoid, false 
   | PEreturn el ->
      (* TODO *) TEreturn [], tvoid, true
@@ -114,7 +227,6 @@ and expr_desc env loc = function
   | PEvars _ ->
      (* TODO *) assert false 
 
-let found_main = ref false
 
 (* 1. declare structures *)
 (* builds a *typed* structure environment, with at first no field *)
@@ -130,17 +242,6 @@ let sizeof = function
   | _ -> (* TODO *) assert false 
 
 
-(* associate precise type if valid in a given context *)
-(* replacement for the original 'type_type' function *)
-let rec find_type structures = function
-  | PTptr ptyp -> Tptr (find_type structures ptyp)
-  | PTident {id = "int"; loc} -> Tint
-  | PTident {id = "bool"; loc} -> Tbool
-  | PTident {id = "string"; loc} -> Tstring
-  | PTident {id; loc} -> if M.mem id structures
-      then Tstruct (M.find id structures)
-      else raise (Error (loc, "unknown type '" ^ id ^ "'"))
-
 (* returns a list of typed parameters for a given function, as a list of vars *)
 let rec build_parameters structures f_name used_names = function
   | [] -> []
@@ -149,8 +250,7 @@ let rec build_parameters structures f_name used_names = function
         "': redefinition of parameter '" ^ id ^ "'"))
       else begin
         let typ = find_type structures ptyp in
-        (* NOTE v_id may need to be changed in the future *)
-        let v = {v_name=id; v_id=0; v_loc=loc; v_typ=typ; v_used=false; v_addr=false} in
+        let v = new_var id loc typ in
         v :: build_parameters structures f_name (id :: used_names) q
       end
 
@@ -165,6 +265,7 @@ let rec add_fields structure_context structure used_names = function
         Hashtbl.add structure.s_fields id {f_name=id; f_typ=typ; f_ofs=0};
         add_fields structure_context structure (id :: used_names) q
       end
+
 
 (* 2. declare functions and type fields *)
 (* only creates function mappings while editing structure fields *)
@@ -184,11 +285,11 @@ let phase2 structures functions = function
 
 
 (* 3. type check function bodies *)
-let decl = function
+let decl structures functions = function
   | PDfunction { pf_name={id; loc}; pf_body = e; pf_typ=tyl } ->
     (* TODO check name and type *) 
     let f = { fn_name = id; fn_params = []; fn_typ = []} in
-    let e, rt = expr Env.empty e in
+    let e, rt = expr structures functions Env.empty e in
     TDfunction (f, e)
   | PDstruct {ps_name={id}} ->
     (* TODO *) let s = { s_name = id; s_fields = Hashtbl.create 5 } in
@@ -201,7 +302,7 @@ let file ~debug:b (imp, dl) =
   let structures = List.fold_left phase1 M.empty dl in
   let functions = List.fold_left (phase2 structures) M.empty dl in
   if not !found_main then raise (Error (dummy_loc, "missing method main"));
-  let dl = List.map decl dl in
+  let dl = List.map (decl structures functions) dl in
   Env.check_unused (); (* TODO variables non utilisees *)
   if imp && not !fmt_used then raise (Error (dummy_loc, "fmt imported but not used"));
   dl

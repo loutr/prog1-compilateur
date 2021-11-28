@@ -164,6 +164,18 @@ let rec build_parameters structures f_name used_names = function
         v :: build_parameters structures f_name (id :: used_names) q
       end
 
+(* type and add a list of fields to a given structure *)
+let rec add_fields structure_context structure used_names = function
+  | [] -> ()
+  | ({id; loc}, ptyp) :: q -> if List.mem id used_names
+      then raise (Error (loc, "structure '" ^ structure.s_name ^
+        "': redefinition of field '" ^ id ^ "'"))
+      else begin
+        let typ = find_type structure_context ptyp in
+        Hashtbl.add structure.s_fields id {f_name=id; f_typ=typ; f_ofs=0};
+        add_fields structure_context structure (id :: used_names) q
+      end
+
 (* 2. declare functions and type fields *)
 (* only creates function mappings while editing structure fields *)
 let phase2 structures functions = function
@@ -175,11 +187,9 @@ let phase2 structures functions = function
       let fn_typ = List.map (find_type structures) tyl in
       M.add id {fn_name=id; fn_params; fn_typ} functions
 
-  | PDstruct {ps_name = {id=id_s; _}; ps_fields} ->
-      let s = M.find id_s structures in
-      List.iter (function ({id; loc}, ptyp) ->
-        let typ = find_type structures ptyp in
-        Hashtbl.add s.s_fields id {f_name=id; f_typ=typ; f_ofs=0}) ps_fields;
+  | PDstruct {ps_name = {id; _}; ps_fields} ->
+      let s = M.find id structures in
+      add_fields structures s [] ps_fields;
       functions
 
 

@@ -5,24 +5,17 @@ open Ast
 open Tast
 
 let debug = ref false
+let fmt_used = ref false
+let fmt_imported = ref false
 
 let dummy_loc = Lexing.dummy_pos, Lexing.dummy_pos
-
 exception Error of Ast.location * string
 
-let error loc e = raise (Error (loc, e))
-
-(* on utilise une map *)
+(* context types *)
 type struct_env = structure M.t
 type fun_env = function_ M.t
 
-(* ptyp -> typ *)
-let rec type_type = function
-  | PTident { id = "int" } -> Tint
-  | PTident { id = "bool" } -> Tbool
-  | PTident { id = "string" } -> Tstring
-  | PTptr ty -> Tptr (type_type ty)
-  | _ -> error dummy_loc ("unknown struct ") (* TODO type structure *)
+
 
 let rec eq_type ty1 ty2 = match ty1, ty2 with
   | Tint, Tint | Tbool, Tbool | Tstring, Tstring -> true
@@ -31,8 +24,6 @@ let rec eq_type ty1 ty2 = match ty1, ty2 with
   | _ -> false
     (* TODO autres types *)
 
-let fmt_used = ref false
-let fmt_imported = ref false
 
 let evar v = { expr_desc = TEident v; expr_typ = v.v_typ }
 
@@ -52,7 +43,7 @@ module Env = struct
   let all_vars = ref []
   let check_unused () =
     let check v =
-      if v.v_name <> "_" && (* TODO used *) true then error v.v_loc "unused variable" in
+      if v.v_name <> "_" && (* TODO used *) true then raise (Error (v.v_loc, "unused variable")) in
     List.iter check !all_vars
 
 
@@ -95,10 +86,10 @@ and expr_desc env loc = function
   | PEcall ({id="new"}, [{pexpr_desc=PEident {id}}]) ->
      let ty = match id with
        | "int" -> Tint | "bool" -> Tbool | "string" -> Tstring
-       | _ -> (* TODO *) error loc ("no such type " ^ id) in
+       | _ -> (* TODO *) raise (Error (loc, "no such type " ^ id)) in
      TEnew ty, Tptr ty, false
   | PEcall ({id="new"}, _) ->
-     error loc "new expects a type"
+     raise (Error (loc, "new expects a type"))
   | PEcall (id, el) ->
      (* TODO *) assert false
   | PEfor (e, b) ->
@@ -109,7 +100,7 @@ and expr_desc env loc = function
      (* TODO *) assert false
   | PEident {id=id} ->
      (* TODO *) (try let v = Env.find id env in TEident v, v.v_typ, false
-      with Not_found -> error loc ("unbound variable " ^ id))
+      with Not_found -> raise (Error (loc, "unbound variable " ^ id)))
   | PEdot (e, id) ->
      (* TODO *) assert false
   | PEassign (lvl, el) ->
@@ -140,16 +131,15 @@ let sizeof = function
 
 
 (* associate precise type if valid in a given context *)
+(* replacement for the original 'type_type' function *)
 let rec find_type structures = function
   | PTptr ptyp -> Tptr (find_type structures ptyp)
-  | PTident {id; loc} -> begin match id with
-    | "int" -> Tint
-    | "bool" -> Tbool
-    | "string" -> Tstring
-    | _ -> if M.mem id structures
-        then Tstruct (M.find id structures)
-        else raise (Error (loc, "unknown type '" ^ id ^ "'"))
-    end
+  | PTident {id = "int"; loc} -> Tint
+  | PTident {id = "bool"; loc} -> Tbool
+  | PTident {id = "string"; loc} -> Tstring
+  | PTident {id; loc} -> if M.mem id structures
+      then Tstruct (M.find id structures)
+      else raise (Error (loc, "unknown type '" ^ id ^ "'"))
 
 (* returns a list of typed parameters for a given function, as a list of vars *)
 let rec build_parameters structures f_name used_names = function

@@ -12,10 +12,11 @@ exception Error of Ast.location * string
 
 let error loc e = raise (Error (loc, e))
 
-(* TODO environnement pour les types structure *)
+(* on utilise une map *)
+type struct_env = structure M.t
+type fun_env = function_ M.t
 
-(* TODO environnement pour les fonctions *)
-
+(* ptyp -> typ *)
 let rec type_type = function
   | PTident { id = "int" } -> Tint
   | PTident { id = "bool" } -> Tbool
@@ -65,19 +66,26 @@ end
 
 let tvoid = Tmany []
 let make d ty = { expr_desc = d; expr_typ = ty }
-let stmt d = make d tvoid
+let stmt d = make d tvoid (* statement *)
 
 let rec expr env e =
  let e, ty, rt = expr_desc env e.pexpr_loc e.pexpr_desc in
   { expr_desc = e; expr_typ = ty }, rt
 
+(* à un environnement, une localisation, une expression
+   associe: une expression typée (epxr_desc), un type d'expression (typ),
+   et si oui ou non l'expression renvoie quelque chose *)
 and expr_desc env loc = function
   | PEskip ->
      TEskip, tvoid, false
-  | PEconstant c ->
-    (* TODO *) TEconstant c, tvoid, false
+  | PEconstant c -> begin
+      match c with
+      | Cint _ -> TEconstant c, Tint, false
+      | Cstring _ -> TEconstant c, Tstring, false
+      | Cbool _ -> TEconstant c, Tbool, false
+    end
   | PEbinop (op, e1, e2) ->
-    (* TODO *) assert false
+    (* TODO TODO TODO *) assert false
   | PEunop (Uamp, e1) ->
     (* TODO *) assert false
   | PEunop (Uneg | Unot | Ustar as op, e1) ->
@@ -118,20 +126,62 @@ and expr_desc env loc = function
 let found_main = ref false
 
 (* 1. declare structures *)
-let phase1 = function
-  | PDstruct { ps_name = { id = id; loc = loc }} -> (* TODO *) ()
-  | PDfunction _ -> ()
+(* builds a *typed* structure environment, with at first no field *)
+let phase1 structures = function
+  | PDstruct ({ps_name = {id; loc}; _} as s) ->
+      if M.mem id structures
+        then raise (Error (loc, "structure '" ^ id ^ "' already defined"))
+        else M.add id {s_name=id; s_fields=(Hashtbl.create 5)} structures
+  | PDfunction _ -> structures
 
 let sizeof = function
   | Tint | Tbool | Tstring | Tptr _ -> 8
   | _ -> (* TODO *) assert false 
 
+
+(* associate precise type if valid in a given context *)
+let rec find_type structures = function
+  | PTptr ptyp -> Tptr (find_type structures ptyp)
+  | PTident {id; loc} -> begin match id with
+    | "int" -> Tint
+    | "bool" -> Tbool
+    | "string" -> Tstring
+    | _ -> if M.mem id structures
+        then Tstruct (M.find id structures)
+        else raise (Error (loc, "unknown type '" ^ id ^ "'"))
+    end
+
+(* returns a list of typed parameters for a given function, as a list of vars *)
+let rec build_parameters structures f_name used_names = function
+  | [] -> []
+  | ({id; loc}, ptyp) :: q -> if List.mem id used_names
+      then raise (Error (loc, "function '" ^ f_name ^
+        "': redefinition of parameter '" ^ id ^ "'"))
+      else begin
+        let typ = find_type structures ptyp in
+        (* NOTE v_id may need to be changed in the future *)
+        let v = {v_name=id; v_id=0; v_loc=loc; v_typ=typ; v_used=false; v_addr=false} in
+        v :: build_parameters structures f_name (id :: used_names) q
+      end
+
 (* 2. declare functions and type fields *)
-let phase2 = function
-  | PDfunction { pf_name={id; loc}; pf_params=pl; pf_typ=tyl; } ->
-     (* TODO *) () 
-  | PDstruct { ps_name = {id}; ps_fields = fl } ->
-     (* TODO *) () 
+(* only creates function mappings while editing structure fields *)
+let phase2 structures functions = function
+  | PDfunction {pf_name={id; loc}; pf_params=pl; pf_typ=tyl} ->
+      if id = "main" then found_main := true;
+      if M.mem id functions
+        then raise (Error (loc, "function '" ^ id ^ "' already defined"));
+      let fn_params = build_parameters structures id [] pl in
+      let fn_typ = List.map (find_type structures) tyl in
+      M.add id {fn_name=id; fn_params; fn_typ} functions
+
+  | PDstruct {ps_name = {id=id_s; _}; ps_fields} ->
+      let s = M.find id_s structures in
+      List.iter (function ({id; loc}, ptyp) ->
+        let typ = find_type structures ptyp in
+        Hashtbl.add s.s_fields id {f_name=id; f_typ=typ; f_ofs=0}) ps_fields;
+      functions
+
 
 (* 3. type check function bodies *)
 let decl = function
@@ -144,13 +194,14 @@ let decl = function
     (* TODO *) let s = { s_name = id; s_fields = Hashtbl.create 5 } in
      TDstruct s
 
+(* local variables (functions, structures) are used to represent context *)
 let file ~debug:b (imp, dl) =
   debug := b;
   (* fmt_imported := imp; *)
-  List.iter phase1 dl;
-  List.iter phase2 dl;
-  if not !found_main then error dummy_loc "missing method main";
+  let structures = List.fold_left phase1 M.empty dl in
+  let functions = List.fold_left (phase2 structures) M.empty dl in
+  if not !found_main then raise (Error (dummy_loc, "missing method main"));
   let dl = List.map decl dl in
   Env.check_unused (); (* TODO variables non utilisees *)
-  if imp && not !fmt_used then error dummy_loc "fmt imported but not used";
+  if imp && not !fmt_used then raise (Error (dummy_loc, "fmt imported but not used"));
   dl

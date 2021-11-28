@@ -28,6 +28,7 @@ type pexpr =
   { pexpr_desc : pexpr_desc;
     pexpr_loc  : location; }
 
+(* expression description *)
 and pexpr_desc =
   | PEskip
   | PEconstant of constant

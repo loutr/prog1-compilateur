@@ -33,6 +33,7 @@ and var = {
             v_id: int; (* unique *)
            v_loc: Ast.location;
            v_typ: typ;
+         v_depth: int;
   mutable v_used: bool;
   mutable v_addr: bool; (* usage de &x *)
   (* TODO autres informations pour la production de code *)

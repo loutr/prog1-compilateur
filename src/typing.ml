@@ -34,6 +34,57 @@ let type_error_message expected received =
 type struct_env = structure M.t
 type fun_env = function_ M.t
 
+(* expression associated with a variable *)
+let evar v = { expr_desc = TEident v; expr_typ = v.v_typ }
+
+let new_var =
+  let id = ref 0 in
+  fun x loc ?(depth=0) ?(used=false) ty ->
+    incr id;
+    { v_name = x; v_id = !id; v_loc = loc; v_typ = ty;
+      v_depth = depth; v_used = used; v_addr = false }
+
+module Env = struct
+  type e = {
+    vars: var M.t;
+    functions: fun_env;
+    structures: struct_env;
+    return_values: typ list;
+    returns: bool;
+    depth: int;
+  }
+
+  let push_down env = {env with depth = env.depth + 1}
+  let find_opt id env = M.find_opt id env.vars
+  let add env v = {env with vars=(M.add v.v_name v env.vars)}
+  let add_vars = List.fold_left add
+
+  let new_env functions structures f = add_vars {
+    vars=M.empty;
+    functions; structures;
+    return_values=f.fn_typ;
+    returns=false;
+    depth=0
+  } f.fn_params
+
+  let all_vars = ref []
+  let check_unused () =
+    List.iter (fun v -> if v.v_name <> "_" && not v.v_used
+      then raise (Error (v.v_loc, "unused variable")))
+    !all_vars
+
+  let var x loc ty env =
+    let v = new_var x loc ty ~depth:env.depth in
+    all_vars := v :: !all_vars;
+    begin match find_opt x env with
+      | None -> add env v, v
+      | Some v' -> if env.depth > v'.v_depth
+          then add env v, v
+          else raise (Error (loc, "variable '" ^ x ^ "' already defined"))
+    end
+
+  (* TODO type () et vecteur de types *)
+end
 
 
 (* associate precise type if valid in a given structure context *)
@@ -53,21 +104,21 @@ let rec eq_type ty1 ty2 = match ty1, ty2 with
   | Tptr Tmany [], Tptr _ -> true
   | Tptr _, Tptr Tmany [] -> true
   | Tptr ty1, Tptr ty2 -> eq_type ty1 ty2
-  | Tmany [], Tmany [] -> true
-  | Tmany (t1 :: q1), Tmany (t2 :: q2) -> (eq_type t1 t2) && (eq_type (Tmany q1) (Tmany q2))
+(*  | Tmany [], Tmany [] -> true*)
+(*  | Tmany (t1 :: q1), Tmany (t2 :: q2) -> (eq_type t1 t2) && (eq_type (Tmany q1) (Tmany q2))*)
   | _ -> false
 
-let argument_call_correspondance loc expr_typ {v_typ} =
-    if not (eq_type expr_typ v_typ)
-      then raise (Error (loc, type_error_message v_typ expr_typ))
-
-let rec assignation_correspondance loc lvl_typ el_typ = match lvl_typ, el_typ with
+let rec correspondance param loc typ1 typ2 = match typ1, typ2 with
   | [], [] -> ()
-  | _, [] -> raise (Error (loc, "not enough values to unpack"))
-  | [], _ -> raise (Error (loc, "too many values to unpack"))
+  | _, [] -> raise (Error (loc, "not enough " ^ param))
+  | [], _ -> raise (Error (loc, "too many " ^ param))
   | (lt :: lq), (et :: eq) -> if eq_type lt et
-      then assignation_correspondance loc lq eq
+      then correspondance param loc lq eq
       else raise (Error (loc, type_error_message lt et))
+
+let call_correspondance = correspondance "parameters"
+let assignation_correspondance = correspondance "values to unpack"
+let return_correspondance = correspondance "values to return"
 
 let rec lvalue_test {expr_desc} = match expr_desc with
   | TEdot (e, x) -> lvalue_test e
@@ -80,53 +131,6 @@ let is_expression = function
   | Tmany _ -> false
   | _ -> true
 
-
-(* expression associated with a variable *)
-let evar v = { expr_desc = TEident v; expr_typ = v.v_typ }
-
-let new_var =
-  let id = ref 0 in
-  fun x loc ?(used=false) ty ->
-    incr id;
-    { v_name = x; v_id = !id; v_loc = loc; v_typ = ty; v_used = used; v_addr = false }
-
-module Env = struct
-  module M = Map.Make(String)
-  type t = var M.t
-  type e = {
-    vars: t;
-    functions: fun_env;
-    structures: struct_env;
-    return_values: typ list;
-    returns: bool;
-  }
-
-  let find id env = M.find id env.vars
-  let find_opt id env = M.find_opt id env.vars
-  let mem id env = M.mem id env.vars
-  let add env v = {env with vars=(M.add v.v_name v env.vars)}
-  let add_vars = List.fold_left add
-
-  let new_env functions structures f = add_vars {
-    vars=M.empty;
-    functions; structures;
-    return_values=f.fn_typ;
-    returns=false
-  } f.fn_params
-
-  let all_vars = ref []
-  let check_unused () =
-    let check v =
-      if v.v_name <> "_" && (* TODO used *) true then raise (Error (v.v_loc, "unused variable")) in
-    List.iter check !all_vars
-
-  let var x loc ?used ty env =
-    let v = new_var x loc ?used ty in
-    all_vars := v :: !all_vars;
-    add env v, v
-
-  (* TODO type () et vecteur de types *)
-end
 
 let make d ty = { expr_desc = d; expr_typ = ty }
 let stmt d = {expr_desc=d; expr_typ=tvoid} (* statement *)
@@ -203,8 +207,8 @@ and expr_desc env loc = function
   | PEcall ({id; loc}, el) -> begin match M.find_opt id env.functions with
       | Some callee -> 
           let el', typ_list = expr_list env el in
-          List.iter2 (argument_call_correspondance loc)
-          typ_list callee.fn_params;
+          call_correspondance loc typ_list
+            (List.map (fun v -> v.v_typ) callee.fn_params);
           TEcall (callee, el'), Tmany callee.fn_typ, env
       | None -> raise (Error (loc, "unknown function '" ^ id ^ "'"))     
     end
@@ -223,7 +227,7 @@ and expr_desc env loc = function
       and b', _ = expr env b in
       begin match b'.expr_typ, e1'.expr_typ, e2'.expr_typ with
         | Tbool, Tmany [], Tmany [] -> TEif (b', e1', e2'), tvoid,
-            {env with returns = env1.returns && env2.returns}
+            {env with returns = env.returns || (env1.returns && env2.returns)}
         | Tbool, _, _ -> raise (Error (loc, "syntax error"))
         | _, _, _ -> raise (Error (b.pexpr_loc, type_error_message Tbool b'.expr_typ))
       end
@@ -262,11 +266,30 @@ and expr_desc env loc = function
         else TEreturn el', tvoid, {env with returns = true}
 
   | PEblock el ->
-     (* TODO *) TEblock [], tvoid, env
+      let rec iter_block env = function
+        | e :: t -> let e', env' = expr env e in begin match e'.expr_typ with
+            | Tmany [] -> e' :: iter_block env' t
+            | _ -> raise (Error (loc, "this is not an instruction"))
+          end
+        | [] -> []
+      in
+      TEblock (iter_block (Env.push_down env) el), tvoid, env
+
   | PEincdec (e, op) ->
-     (* TODO *) assert false
-  | PEvars _ ->
-     (* TODO *) assert false 
+      let ops = if op = Inc then "increment" else "decrement" in
+      let e', _ = expr env e in begin match e'.expr_typ with
+        | Tint -> if lvalue_test e'
+            then TEincdec (e', op), tvoid, env
+            else raise (Error (loc, "lvalue required as " ^ ops ^ " operand")) 
+        | t -> raise (Error (loc, type_error_message Tint t))
+      end
+
+  | PEvars (ids, typo, el) ->
+      let el', typ_list = expr_list env el in
+      begin match typo with
+        | None -> assert false
+        | Some typ -> assert false
+      end
 
 and expr_list env = function
   | [({pexpr_desc=PEcall _} as call)] ->

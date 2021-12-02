@@ -284,12 +284,32 @@ and expr_desc env loc = function
         | t -> raise (Error (loc, type_error_message Tint t))
       end
 
-  | PEvars (ids, typo, el) ->
+  | PEvars (ids, ptypo, el) ->
       let el', typ_list = expr_list env el in
-      begin match typo with
-        | None -> assert false
-        | Some typ -> assert false
-      end
+      let env', varlist = match ptypo with
+        | None ->
+            let rec instanciate env varlist ids l = match ids, l with
+              | [], [] -> env, varlist
+              | _, [] -> raise (Error (loc, "not enough values to assign"))
+              | [], _ -> raise (Error (loc, "too many values to assign"))
+              | (id :: iq), (t :: q) ->
+                  let env', v = Env.var id.id id.loc t env in
+                  instanciate env' (v :: varlist) iq q
+            in
+            instanciate env [] ids typ_list
+            
+        | Some ptyp -> let typ = find_type env.structures ptyp in
+            let rec instanciate env varlist = function 
+              | [] -> env, varlist
+              | id :: iq ->
+                  let env', v = Env.var id.id id.loc typ env in
+                  instanciate env' (v :: varlist) iq
+            in
+            instanciate env [] ids
+      in
+      let expr_var_list = List.map evar varlist in
+      TEblock [{expr_desc=TEvars varlist; expr_typ=tvoid};
+        {expr_desc=TEassign (expr_var_list, el'); expr_typ=tvoid}], tvoid, env'
 
 and expr_list env = function
   | [({pexpr_desc=PEcall _} as call)] ->

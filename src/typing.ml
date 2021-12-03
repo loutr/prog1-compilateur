@@ -7,7 +7,6 @@ open Tast
 let debug = ref false
 let found_main = ref false
 let fmt_used = ref false
-let fmt_imported = ref false
 
 let dummy_loc = Lexing.dummy_pos, Lexing.dummy_pos
 exception Error of Ast.location * string
@@ -23,7 +22,7 @@ let rec printable_type = function
   | Tptr Tmany [] -> "*nil"
   | Tptr typ -> "*" ^ (printable_type typ)
   | Tmany [] -> "instruction"
-  | Tmany [t] -> printable_type t
+  | Tmany [t] -> printable_type t ^ " #"
   | Tmany (t :: q) -> (printable_type t) ^ " & " ^ (printable_type (Tmany q))
 
 let type_error_message expected received =
@@ -70,7 +69,7 @@ module Env = struct
   let all_vars = ref []
   let check_unused () =
     List.iter (fun v -> if v.v_name <> "_" && not v.v_used
-      then raise (Error (v.v_loc, "unused variable")))
+      then raise (Error (v.v_loc, "unused variable '" ^ v.v_name ^ "'")))
     !all_vars
 
   let var x loc ty env =
@@ -78,12 +77,10 @@ module Env = struct
     all_vars := v :: !all_vars;
     begin match find_opt x env with
       | None -> add env v, v
-      | Some v' -> if env.depth > v'.v_depth
+      | Some v' -> if env.depth > v'.v_depth || x = "_"
           then add env v, v
           else raise (Error (loc, "variable '" ^ x ^ "' already defined"))
     end
-
-  (* TODO type () et vecteur de types *)
 end
 
 
@@ -98,14 +95,15 @@ let rec find_type structures = function
       then Tstruct (M.find id structures)
       else raise (Error (loc, "unknown type '" ^ id ^ "'"))
 
-let rec eq_type ty1 ty2 = match ty1, ty2 with
+let rec eq_type ty1 ty2 =
+  match ty1, ty2 with
   | Tint, Tint | Tbool, Tbool | Tstring, Tstring -> true
   | Tstruct s1, Tstruct s2 -> s1 == s2
   | Tptr Tmany [], Tptr _ -> true
   | Tptr _, Tptr Tmany [] -> true
   | Tptr ty1, Tptr ty2 -> eq_type ty1 ty2
-(*  | Tmany [], Tmany [] -> true*)
-(*  | Tmany (t1 :: q1), Tmany (t2 :: q2) -> (eq_type t1 t2) && (eq_type (Tmany q1) (Tmany q2))*)
+  | Tmany [], Tmany [] -> true
+  | Tmany (t1 :: q1), Tmany (t2 :: q2) -> (eq_type t1 t2) && (eq_type (Tmany q1) (Tmany q2))
   | _ -> false
 
 let rec correspondance param loc typ1 typ2 = match typ1, typ2 with
@@ -118,7 +116,7 @@ let rec correspondance param loc typ1 typ2 = match typ1, typ2 with
 
 let call_correspondance = correspondance "parameters"
 let assignation_correspondance = correspondance "values to unpack"
-let return_correspondance = correspondance "values to return"
+let return_correspondance = correspondance "returned values"
 
 let rec lvalue_test {expr_desc} = match expr_desc with
   | TEdot (e, x) -> lvalue_test e
@@ -136,7 +134,7 @@ let make d ty = { expr_desc = d; expr_typ = ty }
 let stmt d = {expr_desc=d; expr_typ=tvoid} (* statement *)
 
 
-(* types an expression and indicates whether it returns something *)
+(* types an expression and returns a possibly modified environment *)
 let rec expr (env: Env.e) e =
   let e, ty, env' = expr_desc env e.pexpr_loc e.pexpr_desc in
   { expr_desc = e; expr_typ = ty }, env'
@@ -198,6 +196,7 @@ and expr_desc env loc = function
       List.iter (function
         | Tmany _ -> raise (Error (loc, "this is not a correct expression, it cannot be printed"))
         | _ -> ()) typ_list;
+      fmt_used := true;
       TEprint el', tvoid, env
 
   | PEcall ({id="new"}, [{pexpr_desc=PEident ident}]) ->
@@ -209,7 +208,11 @@ and expr_desc env loc = function
           let el', typ_list = expr_list env el in
           call_correspondance loc typ_list
             (List.map (fun v -> v.v_typ) callee.fn_params);
-          TEcall (callee, el'), Tmany callee.fn_typ, env
+          let ret_typ = match callee.fn_typ with
+            | [t] -> t
+            | l -> Tmany l
+          in
+          TEcall (callee, el'), ret_typ, env
       | None -> raise (Error (loc, "unknown function '" ^ id ^ "'"))     
     end
 
@@ -218,7 +221,7 @@ and expr_desc env loc = function
       begin match e'.expr_typ, b'.expr_typ with
         | Tmany [], Tbool -> TEfor (e', b'), tvoid, env
         | _, Tbool -> raise (Error (loc, "syntax error"))
-        | _, _ -> raise (Error (b.pexpr_loc, type_error_message Tbool b'.expr_typ))
+        | _, t -> raise (Error (b.pexpr_loc, type_error_message Tbool t))
       end
 
   | PEif (b, e1, e2) ->
@@ -261,19 +264,19 @@ and expr_desc env loc = function
 
   | PEreturn el ->
       let el', el_typ = expr_list env el in
-      if not (eq_type (Tmany el_typ) (Tmany env.return_values))
-        then raise (Error (loc, type_error_message (Tmany env.return_values) (Tmany el_typ)))
-        else TEreturn el', tvoid, {env with returns = true}
+      return_correspondance loc env.return_values el_typ;
+      TEreturn el', tvoid, {env with returns = true}
 
   | PEblock el ->
       let rec iter_block env = function
         | e :: t -> let e', env' = expr env e in begin match e'.expr_typ with
-            | Tmany [] -> e' :: iter_block env' t
+            | Tmany [] -> let el', env_f = iter_block env' t in e' :: el', env_f
             | _ -> raise (Error (loc, "this is not an instruction"))
           end
-        | [] -> []
+        | [] -> [], env
       in
-      TEblock (iter_block (Env.push_down env) el), tvoid, env
+      let el', env_f = iter_block (Env.push_down env) el in
+      TEblock el', tvoid, {env with returns = env_f.returns}
 
   | PEincdec (e, op) ->
       let ops = if op = Inc then "increment" else "decrement" in
@@ -294,7 +297,9 @@ and expr_desc env loc = function
               | [], _ -> raise (Error (loc, "too many values to assign"))
               | (id :: iq), (t :: q) ->
                   let env', v = Env.var id.id id.loc t env in
-                  instanciate env' (v :: varlist) iq q
+                  if t = Tptr tvoid
+                    then raise (Error (loc, "use of untyped nil"))
+                    else instanciate env' (v :: varlist) iq q
             in
             instanciate env [] ids typ_list
             
@@ -365,7 +370,7 @@ let rec add_fields structure_context structure used_names = function
 (* only creates function mappings while editing structure fields *)
 let phase2 structures functions = function
   | PDfunction {pf_name={id; loc}; pf_params=pl; pf_typ=tyl} ->
-      if id = "main" then found_main := true;
+      if id = "main" && pl = [] && tyl = [] then found_main := true;
       if M.mem id functions
         then raise (Error (loc, "function '" ^ id ^ "' already defined"));
       let fn_params = build_parameters structures id [] pl in
@@ -380,24 +385,28 @@ let phase2 structures functions = function
 
 (* 3. type check function bodies *)
 let decl structures functions = function
-  | PDfunction { pf_name={id; loc}; pf_body = e; pf_typ=tyl } ->
-    (* TODO check name and type *) 
-    let f = { fn_name = id; fn_params = []; fn_typ = []} in
+  | PDfunction {pf_name={id; loc}; pf_body} ->
+    let f = M.find id functions in
     let env = Env.new_env functions structures f in
-    let e, env' = expr env e in
-    TDfunction (f, e)
+    let e, env' = expr env pf_body in
+    if f.fn_typ = [] || env'.returns
+      then TDfunction (f, e)
+      else raise (Error (loc, "missing return statements for function '" ^ id ^ "'"))
+
   | PDstruct {ps_name={id}} ->
-    (* TODO *) let s = { s_name = id; s_fields = Hashtbl.create 5 } in
-     TDstruct s
+    (* TODO implement dfs to detect cyclic definition *)
+    let s = M.find id structures in
+    TDstruct s
 
 (* local variables (functions, structures) are used to represent context *)
 let file ~debug:b (imp, dl) =
   debug := b;
-  (* fmt_imported := imp; *)
   let structures = List.fold_left phase1 M.empty dl in
   let functions = List.fold_left (phase2 structures) M.empty dl in
   if not !found_main then raise (Error (dummy_loc, "missing method main"));
+
   let dl = List.map (decl structures functions) dl in
-  Env.check_unused (); (* TODO variables non utilisees *)
+  Env.check_unused (); 
   if imp && not !fmt_used then raise (Error (dummy_loc, "fmt imported but not used"));
+  if not imp && !fmt_used then raise (Error (dummy_loc, "fmt used but not imported"));
   dl

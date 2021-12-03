@@ -13,9 +13,9 @@ let parse_only = ref false
 let type_only = ref false
 
 let spec =
-  [ "--debug", Arg.Set debug, "  runs in debug mode";
-    "--parse-only", Arg.Set parse_only, "  stops after parsing";
-    "--type-only", Arg.Set type_only, "  stops after typing";
+  [ "--debug",      Arg.Set debug,      "\truns in debug mode";
+    "--parse-only", Arg.Set parse_only, "\tstops after parsing";
+    "--type-only",  Arg.Set type_only,  "\tstops after typing";
   ]
 
 let file =
@@ -29,9 +29,8 @@ let file =
   match !file with Some f -> f | None -> Arg.usage spec usage; exit 1
 
 let debug = !debug
-let type_only = !type_only
 
-let report_loc (b,e) =
+let report_loc (b, e) =
   let l = b.pos_lnum in
   let fc = b.pos_cnum - b.pos_bol in
   let lc = e.pos_cnum - b.pos_bol in
@@ -44,12 +43,15 @@ let () =
     let f = Parser.file Lexer.next_token lb in
     close_in c;
     if !parse_only then exit 0;
+
     let f = Typing.file ~debug f in
     (* TODO add "ast_file" when "debug" is true. *)
-    if type_only then exit 0;
-    let f = Rewrite.file ~debug f in
     if debug then eprintf "%a@." Pretty.file f;
+    if !type_only then exit 0;
+
+    let f = Rewrite.file ~debug f in
     let code = Compile.file ~debug f in
+
     let c = open_out (Filename.chop_suffix file ".go" ^ ".s") in
     let fmt = formatter_of_out_channel c in
     X86_64.print_program fmt code;

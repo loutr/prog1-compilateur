@@ -20,7 +20,7 @@ let rec printable_type = function
   | Tbool -> "bool"
   | Tstring -> "string"
   | Tstruct structure -> structure.s_name
-  | Tptr Tmany [] -> "*nil"
+  | Tptrnil -> "<nil>"
   | Tptr typ -> "*" ^ (printable_type typ)
   | Tmany [] -> "instruction"
   | Tmany [t] -> printable_type t ^ " #"
@@ -102,8 +102,8 @@ let rec eq_type ty1 ty2 =
   match ty1, ty2 with
   | Tint, Tint | Tbool, Tbool | Tstring, Tstring -> true
   | Tstruct s1, Tstruct s2 -> s1 == s2
-  | Tptr Tmany [], Tptr _ -> true
-  | Tptr _, Tptr Tmany [] -> true
+  | Tptrnil, Tptr _ -> true
+  | Tptr _, Tptrnil -> true
   | Tptr ty1, Tptr ty2 -> eq_type ty1 ty2
   | _ -> false
 
@@ -182,7 +182,7 @@ and expr_desc env loc = function
         | Uneg, t -> raise (Error (e1.pexpr_loc, type_error_message Tint t))
         | Unot, Tbool -> TEunop (Unot, e1'), Tbool, env
         | Unot, t -> raise (Error (e1.pexpr_loc, type_error_message Tbool t))
-        | Ustar, Tptr Tmany [] -> raise (Error (e1.pexpr_loc, "cannot dereference nil"))
+        | Ustar, Tptrnil -> raise (Error (e1.pexpr_loc, "cannot dereference nil"))
         | Ustar, Tptr t -> TEunop (Ustar, e1'), t, env
         | _ -> raise (Error (e1.pexpr_loc, "cannot dereference this"))
       end  
@@ -232,7 +232,7 @@ and expr_desc env loc = function
         | _, _, _ -> raise (Error (b.pexpr_loc, type_error_message Tbool b'.expr_typ))
       end
 
-  | PEnil -> TEnil, Tptr tvoid, env
+  | PEnil -> TEnil, Tptrnil, env
       
   | PEident {id} -> begin match Env.find_opt id env with
       | Some v -> v.v_used <- true; TEident v, v.v_typ, env
@@ -305,7 +305,7 @@ and expr_desc env loc = function
               | [], _ -> raise (Error (loc, "too many values to unpack"))
               | (id :: iq), (t :: q) ->
                   let env', v = Env.var id.id id.loc t env in
-                  if t = Tptr tvoid
+                  if t = Tptrnil
                     then raise (Error (loc, "use of untyped nil"))
                     else instanciate env' (v :: varlist) iq q
             in

@@ -18,15 +18,14 @@ type function_ = {
 and structure = {
           s_name: string;
         s_fields: (string, field) Hashtbl.t;
-  (* TODO autres informations pour l'analyse semantique *)
 }
 
 and typ =
   | Tint | Tbool | Tstring
   | Tstruct of structure
   | Tptr of typ
+  | Tptrnil
   | Tmany of typ list (* 0 ou >= 2 *)
-  (* TODO autres types pour l'analyse semantique *)
 
 and var = {
           v_name: string;

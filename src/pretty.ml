@@ -206,6 +206,7 @@ let rec get_tast_typ typ parent_id =
       ("s_fields", fold_hashtbl_children (fun (_, field) -> get_tast_field field) s_fields)
     ]
   | Tptr typ -> create_node "Tptr" [] [ ("typ", get_tast_typ typ) ]
+  | Tptrnil -> create_node "Tptrnil" [] []
   | Tmany typ_list -> create_node "Tmany" [] [ ("typ_list", fold_children get_tast_typ typ_list) ]
 
 and get_tast_field { f_name; f_typ; f_ofs } parent_id =

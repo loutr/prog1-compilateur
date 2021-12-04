@@ -2,41 +2,10 @@
 (* Programme principal *)
 
 open Format
-open Lexing
 open Lexer
+open Lexing
 open Parser
-
-let usage = "usage: ./pgoc [options] file.go"
-
-let debug = ref false
-let no_pretty = ref false
-let parse_only = ref false
-let type_only = ref false
-
-let spec =
-  [ "--debug",        Arg.Set debug,        "\truns in debug mode";
-    "--no-pretty",    Arg.Set no_pretty,    "\tdisplays trees in the command line";
-    "--parse-only",   Arg.Set parse_only,   "\tstops after parsing";
-    "--type-only",    Arg.Set type_only,    "\tstops after typing";
-  ]
-
-let file =
-  let file = ref None in
-  let set_file s =
-    if not (Filename.check_suffix s ".go") then
-      raise (Arg.Bad "no .go extension");
-    file := Some s
-  in
-  Arg.parse spec set_file usage;
-  match !file with Some f -> f | None -> Arg.usage spec usage; exit 1
-
-let debug = !debug
-
-let report_loc (b, e) =
-  let l = b.pos_lnum in
-  let fc = b.pos_cnum - b.pos_bol in
-  let lc = e.pos_cnum - b.pos_bol in
-  eprintf "File \"%s\", line %d, characters %d-%d:\n" file l fc lc
+open File
 
 let () =
   let c = open_in file in
@@ -72,20 +41,18 @@ let () =
     close_out c
   with
     | Lexer.Lexing_error s ->
-	report_loc (lexeme_start_p lb, lexeme_end_p lb);
-	eprintf "lexical error: %s\n@." s;
-	exit 1
+        report_loc (lexeme_start_p lb, lexeme_end_p lb);
+        eprintf "lexical error: %s\n@." s;
+        exit 1
     | Parser.Error ->
-	report_loc (lexeme_start_p lb, lexeme_end_p lb);
-	eprintf "syntax error\n@.";
-	exit 1
+        report_loc (lexeme_start_p lb, lexeme_end_p lb);
+        eprintf "syntax error\n@.";
+        exit 1
     | Typing.Error (l, msg) ->
-	report_loc l;
-	eprintf "error: %s\n@." msg;
-	exit 1
+        report_loc l;
+        eprintf "error: %s\n@." msg;
+        exit 1
     | e ->
-	eprintf "Anomaly: %s\n@." (Printexc.to_string e);
-	exit 2
-
-
+        eprintf "Anomaly: %s\n@." (Printexc.to_string e);
+        exit 2
 

@@ -1,5 +1,6 @@
 
 open Format
+open File
 open Lib
 open Ast
 open Tast
@@ -265,9 +266,13 @@ and expr_desc env loc = function
       TEreturn el', tvoid, {env with returns = true}
 
   | PEblock el ->
+      let has_already_returned = ref false in
       let rec iter_block env = function
         | e :: t -> let e', env' = expr env e in begin match e'.expr_typ with
-            | Tmany [] -> let el', env_f = iter_block env' t in e' :: el', env_f
+            | Tmany [] -> let el', env_f = iter_block env' t in
+                if env.returns && not !has_already_returned
+                  then (warning e.pexpr_loc "instructions after return instruction"; has_already_returned := true);
+                e' :: el', env_f
             | _ -> raise (Error (loc, "this is not an instruction"))
           end
         | [] -> [], env
@@ -346,6 +351,8 @@ and expr_list env = function
 (* 1. declare structures *)
 (* builds a *typed* structure environment, with at first no field *)
 let phase1 structures = function
+  | PDstruct {ps_name = {id = ("int" | "bool" | "string") as id; loc}; _} ->
+      raise (Error (loc, "redefinition of type primitive '" ^ id ^ "'"))
   | PDstruct {ps_name = {id; loc}; _} ->
       if M.mem id structures
         then raise (Error (loc, "structure '" ^ id ^ "' already defined"))

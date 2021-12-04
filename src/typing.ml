@@ -24,8 +24,8 @@ let rec printable_type = function
   | Tptrnil -> "<nil>"
   | Tptr typ -> "*" ^ (printable_type typ)
   | Tmany [] -> "instruction"
-  | Tmany [t] -> printable_type t ^ " #"
-  | Tmany (t :: q) -> (printable_type t) ^ " & " ^ (printable_type (Tmany q))
+  | Tmany [t] -> printable_type t ^ " (·)"
+  | Tmany (t :: q) -> (printable_type t) ^ " · " ^ (printable_type (Tmany q))
 
 let type_error_message expected received =
   "This expression has type '" ^ (printable_type received)
@@ -74,15 +74,18 @@ module Env = struct
       then raise (Error (v.v_loc, "unused variable '" ^ v.v_name ^ "'")))
     !all_vars
 
-  let var x loc ty env =
-    let v = new_var x loc ty ~depth:env.depth in
-    all_vars := v :: !all_vars;
-    begin match find_opt x env with
-      | None -> add env v, v
-      | Some v' -> if env.depth > v'.v_depth || x = "_"
-          then add env v, v
-          else raise (Error (loc, "variable '" ^ x ^ "' already defined"))
-    end
+  let var x loc ty ?(used=false) env = match ty with
+      | Tmany _ | Tptrnil -> raise (Error (loc,
+          "variable '" ^ x ^ "' may not have type '" ^ printable_type ty ^ "'"))
+
+      | _ -> let v = new_var x loc ty ~used ~depth:env.depth in
+          all_vars := v :: !all_vars;
+          begin match find_opt x env with
+            | None -> add env v, v
+            | Some v' -> if env.depth > v'.v_depth || x = "_"
+                then add env v, v
+                else raise (Error (loc, "variable '" ^ x ^ "' already defined"))
+          end
 end
 
 
@@ -310,9 +313,7 @@ and expr_desc env loc = function
               | [], _ -> raise (Error (loc, "too many values to unpack"))
               | (id :: iq), (t :: q) ->
                   let env', v = Env.var id.id id.loc t env in
-                  if t = Tptrnil
-                    then raise (Error (loc, "use of untyped nil"))
-                    else instanciate env' (v :: varlist) iq q
+                    instanciate env' (v :: varlist) iq q
             in
             let env', varlist = instanciate env [] ids typ_list in
             let expr_var_list = List.map evar varlist in
@@ -325,11 +326,12 @@ and expr_desc env loc = function
               | [], [] -> env, varlist
               | _, [] -> raise (Error (loc, "not enough values to unpack"))
               | [], _ -> raise (Error (loc, "too many values to unpack"))
-              | (id :: iq), (t :: q) ->
-                  let env', v = Env.var id.id id.loc t env in
-                  if eq_type t typ
-                    then instanciate env' (v :: varlist) iq q
-                    else raise (Error (loc, type_error_message typ t))
+              | (id :: iq), (t :: q) -> if eq_type t typ
+                  then begin
+                    let env', v = Env.var id.id id.loc typ env in
+                    instanciate env' (v :: varlist) iq q
+                  end
+                  else raise (Error (loc, type_error_message typ t))
             in
             let env', varlist = instanciate env [] ids typ_list in
             let expr_var_list = List.map evar varlist in
@@ -372,7 +374,7 @@ let rec build_parameters structures f_name used_names = function
         "': redefinition of parameter '" ^ id ^ "'"))
       else begin
         let typ = find_type structures ptyp in
-        let v = new_var id loc typ in
+        let v = new_var id loc typ ~used:true in
         v :: build_parameters structures f_name (id :: used_names) q
       end
 

@@ -1,3 +1,5 @@
 src/_build/
 src/pgoc
 src/.merlin
+*.dot
+*.svg

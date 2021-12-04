@@ -7,6 +7,7 @@ open Tast
 let debug = ref false
 let found_main = ref false
 let fmt_used = ref false
+let fmt_imported = ref true
 
 let dummy_loc = Lexing.dummy_pos, Lexing.dummy_pos
 exception Error of Ast.location * string
@@ -95,6 +96,8 @@ let rec find_type structures = function
       then Tstruct (M.find id structures)
       else raise (Error (loc, "unknown type '" ^ id ^ "'"))
 
+(* Tests equality between types. *)
+(* instruction types (Tmany []) shall never be tested *)
 let rec eq_type ty1 ty2 =
   match ty1, ty2 with
   | Tint, Tint | Tbool, Tbool | Tstring, Tstring -> true
@@ -102,8 +105,6 @@ let rec eq_type ty1 ty2 =
   | Tptr Tmany [], Tptr _ -> true
   | Tptr _, Tptr Tmany [] -> true
   | Tptr ty1, Tptr ty2 -> eq_type ty1 ty2
-  | Tmany [], Tmany [] -> true
-  | Tmany (t1 :: q1), Tmany (t2 :: q2) -> (eq_type t1 t2) && (eq_type (Tmany q1) (Tmany q2))
   | _ -> false
 
 let rec correspondance param loc typ1 typ2 = match typ1, typ2 with
@@ -123,11 +124,6 @@ let rec lvalue_test {expr_desc} = match expr_desc with
   | TEident _ -> true
   | TEunop (Ustar, _) -> true
   | _ -> false
-
-(* Tmany characterises instructions and multiple-return functions *)
-let is_expression = function
-  | Tmany _ -> false
-  | _ -> true
 
 
 let make d ty = { expr_desc = d; expr_typ = ty }
@@ -192,6 +188,7 @@ and expr_desc env loc = function
       end  
 
   | PEcall ({id = "fmt.Print"; loc}, el) ->
+      if not !fmt_imported then raise (Error (loc, "unknown function 'fmt.Print'"));
       let el', typ_list = expr_list env el in
       List.iter (function
         | Tmany _ -> raise (Error (loc, "this is not a correct expression, it cannot be printed"))
@@ -216,7 +213,7 @@ and expr_desc env loc = function
       | None -> raise (Error (loc, "unknown function '" ^ id ^ "'"))     
     end
 
-  | PEfor (e, b) ->
+  | PEfor (b, e) ->
       let e', _ = expr env e and b', _ = expr env b in
       begin match e'.expr_typ, b'.expr_typ with
         | Tmany [], Tbool -> TEfor (e', b'), tvoid, env
@@ -289,32 +286,51 @@ and expr_desc env loc = function
 
   | PEvars (ids, ptypo, el) ->
       let el', typ_list = expr_list env el in
-      let env', varlist = match ptypo with
-        | None ->
-            let rec instanciate env varlist ids l = match ids, l with
-              | [], [] -> env, varlist
-              | _, [] -> raise (Error (loc, "not enough values to assign"))
-              | [], _ -> raise (Error (loc, "too many values to assign"))
-              | (id :: iq), (t :: q) ->
-                  let env', v = Env.var id.id id.loc t env in
-                  if t = Tptr tvoid
-                    then raise (Error (loc, "use of untyped nil"))
-                    else instanciate env' (v :: varlist) iq q
-            in
-            instanciate env [] ids typ_list
-            
-        | Some ptyp -> let typ = find_type env.structures ptyp in
+      begin match ptypo, el' with
+        | Some ptyp, [] ->
+            let typ = find_type env.structures ptyp in
             let rec instanciate env varlist = function 
               | [] -> env, varlist
               | id :: iq ->
                   let env', v = Env.var id.id id.loc typ env in
                   instanciate env' (v :: varlist) iq
             in
-            instanciate env [] ids
-      in
-      let expr_var_list = List.map evar varlist in
-      TEblock [{expr_desc=TEvars varlist; expr_typ=tvoid};
-        {expr_desc=TEassign (expr_var_list, el'); expr_typ=tvoid}], tvoid, env'
+            let env', varlist = instanciate env [] ids in
+            TEvars varlist, tvoid, env'
+            
+        | None, _ ->
+            let rec instanciate env varlist ids l = match ids, l with
+              | [], [] -> env, varlist
+              | _, [] -> raise (Error (loc, "not enough values to unpack"))
+              | [], _ -> raise (Error (loc, "too many values to unpack"))
+              | (id :: iq), (t :: q) ->
+                  let env', v = Env.var id.id id.loc t env in
+                  if t = Tptr tvoid
+                    then raise (Error (loc, "use of untyped nil"))
+                    else instanciate env' (v :: varlist) iq q
+            in
+            let env', varlist = instanciate env [] ids typ_list in
+            let expr_var_list = List.map evar varlist in
+            TEblock [{expr_desc=TEvars varlist; expr_typ=tvoid};
+              {expr_desc=TEassign (expr_var_list, el'); expr_typ=tvoid}], tvoid, env'
+
+        | Some ptyp, _ ->
+            let typ = find_type env.structures ptyp in
+            let rec instanciate env varlist ids l = match ids, l with
+              | [], [] -> env, varlist
+              | _, [] -> raise (Error (loc, "not enough values to unpack"))
+              | [], _ -> raise (Error (loc, "too many values to unpack"))
+              | (id :: iq), (t :: q) ->
+                  let env', v = Env.var id.id id.loc t env in
+                  if eq_type t typ
+                    then instanciate env' (v :: varlist) iq q
+                    else raise (Error (loc, type_error_message typ t))
+            in
+            let env', varlist = instanciate env [] ids typ_list in
+            let expr_var_list = List.map evar varlist in
+            TEblock [{expr_desc=TEvars varlist; expr_typ=tvoid};
+              {expr_desc=TEassign (expr_var_list, el'); expr_typ=tvoid}], tvoid, env'
+      end
 
 and expr_list env = function
   | [({pexpr_desc=PEcall _} as call)] ->
@@ -330,7 +346,7 @@ and expr_list env = function
 (* 1. declare structures *)
 (* builds a *typed* structure environment, with at first no field *)
 let phase1 structures = function
-  | PDstruct ({ps_name = {id; loc}; _} as s) ->
+  | PDstruct {ps_name = {id; loc}; _} ->
       if M.mem id structures
         then raise (Error (loc, "structure '" ^ id ^ "' already defined"))
         else M.add id {s_name=id; s_fields=(Hashtbl.create 5)} structures
@@ -401,12 +417,16 @@ let decl structures functions = function
 (* local variables (functions, structures) are used to represent context *)
 let file ~debug:b (imp, dl) =
   debug := b;
+  fmt_imported := imp;
+
   let structures = List.fold_left phase1 M.empty dl in
+  if !debug then print_string "PHASE 1 DONE\n";
   let functions = List.fold_left (phase2 structures) M.empty dl in
+  if !debug then print_string "PHASE 2 DONE\n";
   if not !found_main then raise (Error (dummy_loc, "missing method main"));
 
   let dl = List.map (decl structures functions) dl in
   Env.check_unused (); 
   if imp && not !fmt_used then raise (Error (dummy_loc, "fmt imported but not used"));
-  if not imp && !fmt_used then raise (Error (dummy_loc, "fmt used but not imported"));
+  if !debug then print_string "PHASE 3 DONE\n";
   dl

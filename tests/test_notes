@@ -1,0 +1,5 @@
+- test fonction dont le block n'est qu'une seule instruction (sans accolade)
+- assignation utilisant nil avec et sans indication de type
+- fonction ne renvoyant rien utilisée comme une instruction
+- utilisation de _ dans une assignation sans l'avoir déclaré auparavant
+- détection variable utilisée avec différents blocs

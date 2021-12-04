@@ -398,6 +398,28 @@ let phase2 structures functions = function
       add_fields structures s [] ps_fields;
       functions
 
+exception Cyclic of string * string
+
+let cyclic_definition_detection structures =
+  let marks = Hashtbl.create 5 and fin = Hashtbl.create 5 in
+  let rec dfs {s_name; s_fields} = if not (Hashtbl.mem fin s_name) then begin
+    if Hashtbl.mem marks s_name
+      then raise (Cyclic (s_name, "has field of type '" ^ s_name ^ "'"))
+      else try
+        Hashtbl.add marks s_name ();
+        Hashtbl.iter (fun s -> function
+          | {f_typ=Tstruct structure} -> dfs structure
+          | _ -> ()
+        ) s_fields;
+        Hashtbl.add fin s_name ()
+      with
+        | Cyclic (orig, trail) when orig = s_name ->
+            raise (Error (dummy_loc, "cyclic definition:\n\tstructure '" ^ s_name ^ "' " ^ trail))
+        | Cyclic (orig, trail) ->
+            raise (Cyclic (orig, "has field of type '" ^ s_name ^ "'\n\twhich " ^ trail))
+  end in
+  M.iter (fun s -> dfs) structures
+        
 
 (* 3. type check function bodies *)
 let decl structures functions = function
@@ -410,7 +432,6 @@ let decl structures functions = function
       else raise (Error (loc, "missing return statements for function '" ^ id ^ "'"))
 
   | PDstruct {ps_name={id}} ->
-    (* TODO implement dfs to detect cyclic definition *)
     let s = M.find id structures in
     TDstruct s
 
@@ -423,7 +444,9 @@ let file ~debug:b (imp, dl) =
   if !debug then print_string "PHASE 1 DONE\n";
   let functions = List.fold_left (phase2 structures) M.empty dl in
   if !debug then print_string "PHASE 2 DONE\n";
+  
   if not !found_main then raise (Error (dummy_loc, "missing method main"));
+  cyclic_definition_detection structures;
 
   let dl = List.map (decl structures functions) dl in
   Env.check_unused (); 

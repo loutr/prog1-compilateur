@@ -19,8 +19,9 @@ test_category () {
 	    ((success_count++))
 	else
 	    tput setaf 1; echo "FAILED - $filetest"
-	    echo "compiler responded:"; tput setaf 7
+	    echo "compiler responded:"; echo "-------------------"; tput setaf 7
 	    cat pgoc.log
+	    tput setaf 1; echo "-------------------"; tput setaf 1
 	fi
 	((total_count++))
     done

@@ -202,9 +202,7 @@ let rec get_tast_typ typ parent_id =
   | Tint -> create_node "Tint" [] []
   | Tbool -> create_node "Tbool" [] []
   | Tstring -> create_node "Tstring" [] []
-  | Tstruct {s_name; s_fields} -> create_node "Tstruct" [ "s_name = \"" ^ s_name ^ "\""] [
-      ("s_fields", fold_hashtbl_children (fun (_, field) -> get_tast_field field) s_fields)
-    ]
+  | Tstruct {s_name; s_fields} -> create_node "Tstruct" [ "s_name = \"" ^ s_name ^ "\""] []
   | Tptr typ -> create_node "Tptr" [] [ ("typ", get_tast_typ typ) ]
   | Tptrnil -> create_node "Tptrnil" [] []
   | Tmany typ_list -> create_node "Tmany" [] [ ("typ_list", fold_children get_tast_typ typ_list) ]

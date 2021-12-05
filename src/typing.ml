@@ -22,6 +22,7 @@ let rec printable_type = function
   | Tstring -> "string"
   | Tstruct structure -> structure.s_name
   | Tptrnil -> "<nil>"
+  | Twild -> raise (Invalid_argument "trying to print wildcard type")
   | Tptr typ -> "*" ^ (printable_type typ)
   | Tmany [] -> "instruction"
   | Tmany [t] -> printable_type t ^ " (·)"
@@ -31,12 +32,21 @@ let type_error_message expected received =
   "This expression has type '" ^ (printable_type received)
   ^ "' but an expression of type '" ^ (printable_type expected) ^ "' was expected"
 
+let incorrect_wild_use = "cannot use _ as value"
+
 (* context types *)
 type struct_env = structure M.t
 type fun_env = function_ M.t
 
 (* expression associated with a variable *)
 let evar v = { expr_desc = TEident v; expr_typ = v.v_typ }
+
+let wildvar = {
+  v_name = "_"; v_id = -1;
+  v_loc = dummy_loc; v_typ = Twild;
+  v_depth = 0; v_used = true; v_addr = false
+}
+             
 
 let new_var =
   let id = ref 0 in
@@ -74,15 +84,17 @@ module Env = struct
       then raise (Error (v.v_loc, "unused variable '" ^ v.v_name ^ "'")))
     !all_vars
 
-  let var x loc ty ?(used=false) env = match ty with
-      | Tmany _ | Tptrnil -> raise (Error (loc,
+  let var x loc ty ?(used=false) env = match x, ty with
+      | _, Tmany _ | _, Tptrnil -> raise (Error (loc,
           "variable '" ^ x ^ "' may not have type '" ^ printable_type ty ^ "'"))
 
-      | _ -> let v = new_var x loc ty ~used ~depth:env.depth in
+      | "_", _ -> env, wildvar
+
+      | _, _ -> let v = new_var x loc ty ~used ~depth:env.depth in
           all_vars := v :: !all_vars;
           begin match find_opt x env with
             | None -> add env v, v
-            | Some v' -> if env.depth > v'.v_depth || x = "_"
+            | Some v' -> if env.depth > v'.v_depth
                 then add env v, v
                 else raise (Error (loc, "variable '" ^ x ^ "' already defined"))
           end
@@ -105,9 +117,9 @@ let rec find_type structures = function
 let rec eq_type ty1 ty2 =
   match ty1, ty2 with
   | Tint, Tint | Tbool, Tbool | Tstring, Tstring -> true
+  | Tptrnil, Tptr _ | Tptr _, Tptrnil -> true
+  | Twild, _ | _, Twild -> true
   | Tstruct s1, Tstruct s2 -> s1 == s2
-  | Tptrnil, Tptr _ -> true
-  | Tptr _, Tptrnil -> true
   | Tptr ty1, Tptr ty2 -> eq_type ty1 ty2
   | _ -> false
 
@@ -238,9 +250,10 @@ and expr_desc env loc = function
 
   | PEnil -> TEnil, Tptrnil, env
       
-  | PEident {id} -> begin match Env.find_opt id env with
-      | Some v -> v.v_used <- true; TEident v, v.v_typ, env
-      | None -> raise (Error (loc, "unknown variable '" ^ id ^ "'"))
+  | PEident {id} -> begin match Env.find_opt id env, id with
+      | _, "_" -> raise (Error (loc, incorrect_wild_use))
+      | Some v, _ -> v.v_used <- true; TEident v, v.v_typ, env
+      | None, _ -> raise (Error (loc, "unknown variable '" ^ id ^ "'"))
     end
 
   | PEdot (e, {id; loc=id_loc}) ->
@@ -256,7 +269,7 @@ and expr_desc env loc = function
       end
 
   | PEassign (lvl, el) ->
-      let lvl', lvl_typ = expr_list env lvl
+      let lvl', lvl_typ = expr_list ~wildcard:true env lvl
       and el', el_typ = expr_list env el in
       List.iter (fun e -> if not (lvalue_test e)
         then raise (Error (loc, "this is not an lvalue, it cannot be assigned a value"))) lvl';
@@ -339,15 +352,19 @@ and expr_desc env loc = function
               {expr_desc=TEassign (expr_var_list, el'); expr_typ=tvoid}], tvoid, env'
       end
 
-and expr_list env = function
+(* evaluates a list of expression (including function calls with multiple return values) *)
+(* the wildcard flag allows the use of _ (in the left part of an assignation for instance) *)
+and expr_list ?(wildcard=false) env = function
   | [({pexpr_desc=PEcall _} as call)] ->
       let e, _ = expr env call in
       begin match e.expr_typ with
         | Tmany l -> [e], l
         | t -> [e], [t]
       end
-  | l -> let l' = List.map
-      (fun e -> let e', _ = expr env e in e', e'.expr_typ) l in
+  | l -> let l' = List.map (function
+      | {pexpr_desc = PEident {id = "_"}} when wildcard -> evar wildvar, Twild
+      | {pexpr_desc = PEident {id = "_"; loc}} -> raise (Error (loc, incorrect_wild_use))
+      | e -> let e', _ = expr env e in e', e'.expr_typ) l in
       List.split l'
 
 (* 1. declare structures *)

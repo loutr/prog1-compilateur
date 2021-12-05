@@ -24,8 +24,9 @@ and typ =
   | Tint | Tbool | Tstring
   | Tstruct of structure
   | Tptr of typ
-  | Tptrnil
-  | Tmany of typ list (* 0 ou >= 2 *)
+  | Twild                   (* bypasses typing, wildcard only *)
+  | Tptrnil                 (* nil type *)
+  | Tmany of typ list       (* instructions and functions return *)
 
 and var = {
           v_name: string;

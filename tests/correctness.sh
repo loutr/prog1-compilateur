@@ -2,16 +2,16 @@
 # Performs various tests to detect false negatives and
 # false positives in the typing process
 
-GOC="../src/pgoc --debug --type-only"
+CALL_PATH="$(dirname "$0")"
 
-GOOD=./good
-BAD=./bad
+GOC="$CALL_PATH/../src/pgoc --debug --type-only"
 
 test_category () {
     total_count=0
     success_count=0
     
-    for filetest in $2/*.go; do
+    for filetest in $(find "$CALL_PATH/$2" -name '*.go'); do
+	filename=${filetest%".go"}
 	$GOC "$filetest" > pgoc.log 2>&1
 	ret=$?
 	if [ $ret -eq "$3" ]; then
@@ -21,16 +21,17 @@ test_category () {
 	    tput setaf 1; echo "FAILED - $filetest"
 	    echo "compiler responded:"; echo "-------------------"; tput setaf 7
 	    cat pgoc.log
-	    tput setaf 1; echo "-------------------"; tput setaf 1
+	    tput setaf 1; echo "-------------------"; tput setaf 7
 	fi
+	rm -f "${filename}_ast.dot" "${filename}_tast.dot"
 	((total_count++))
     done
     echo "($(date)) SCORE FOR $1 TESTS: $success_count/$total_count" >> pgoc_results
     rm pgoc.log
 }
 
-test_category GOOD $GOOD 0
-test_category BAD $BAD 1
+test_category GOOD good 0
+test_category BAD bad 1
 
 cat pgoc_results
 rm pgoc_results

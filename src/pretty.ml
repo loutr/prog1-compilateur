@@ -273,8 +273,9 @@ let rec get_tast_expr { expr_desc } parent_id =
       ("expr_list_right", fold_children get_tast_expr exprs_right)
     ]
 
-  | TEvars vars -> create_node "TEvars" [] [
-      ("var_list", fold_children get_tast_var vars)
+  | TEvars (vars, expr) -> create_node "TEvars" [] [
+      ("var_list", fold_children get_tast_var vars);
+      ("assign_list", fold_children get_tast_expr expr)
     ]
 
   | TEif (cond, if_block, else_block) -> create_node "TEif" [] [

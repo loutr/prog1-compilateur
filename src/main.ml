@@ -52,6 +52,9 @@ let () =
         report_loc l;
         eprintf "error: %s\n@." msg;
         exit 1
+    | Rewrite.Error msg ->
+        eprintf "Rewrite Anomaly: %s\n@." msg;
+        exit 2
     | e ->
         eprintf "Anomaly: %s\n@." (Printexc.to_string e);
         exit 2

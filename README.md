@@ -24,6 +24,8 @@ On distingue deux phases dans le projet:
   n'a pas besoin d'être déclaré par une structure `var _ = ...`;
 - Le fichier `pretty.ml` est celui de v-lafeychine. Il fournit des fichiers DOT qui peuvent ensuite être convertis
   en image vectorielle, par exemple.
+- Les expressions typées `TEvars` contiennent aussi les éventuelles expressions assignées aux variables (qui valent
+  `<nil>` si aucune valeur n'est associée à ce moment-là). Cela rend le code assemblé plus simple.
 
 ### Tests
 Les tests s'effectuent en exécutant le script `correctness.sh` du dossier `tests`. Il peut également être appelé

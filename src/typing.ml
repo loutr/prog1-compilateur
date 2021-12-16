@@ -307,36 +307,33 @@ and expr_desc env loc = function
 
   | PEvars (ids, ptypo, el) ->
       let el', typ_list = expr_list env el in
-      begin match ptypo, el' with
+      let env', varlist, assignlist = match ptypo, el' with
         | Some ptyp, [] ->
+            let nilexpr = {expr_desc = TEnil; expr_typ = Tptrnil} in
             let typ = find_type env.structures ptyp in
-            let rec instanciate env varlist = function 
-              | [] -> env, varlist
+            let rec instanciate env varlist assignlist = function 
+              | [] -> env, varlist, assignlist
               | id :: iq ->
                   let env', v = Env.var id.id id.loc typ env in
-                  instanciate env' (v :: varlist) iq
+                  instanciate env' (v :: varlist) (nilexpr :: assignlist) iq
             in
-            let env', varlist = instanciate env [] ids in
-            TEvars varlist, tvoid, env'
+            instanciate env [] [] ids
             
         | None, _ ->
             let rec instanciate env varlist ids l = match ids, l with
-              | [], [] -> env, varlist
+              | [], [] -> env, varlist, el'
               | _, [] -> raise (Error (loc, "not enough values to unpack"))
               | [], _ -> raise (Error (loc, "too many values to unpack"))
               | (id :: iq), (t :: q) ->
                   let env', v = Env.var id.id id.loc t env in
                     instanciate env' (v :: varlist) iq q
             in
-            let env', varlist = instanciate env [] ids typ_list in
-            let expr_var_list = List.map evar varlist in
-            TEblock [{expr_desc=TEvars varlist; expr_typ=tvoid};
-              {expr_desc=TEassign (expr_var_list, el'); expr_typ=tvoid}], tvoid, env'
+            instanciate env [] ids typ_list
 
         | Some ptyp, _ ->
             let typ = find_type env.structures ptyp in
             let rec instanciate env varlist ids l = match ids, l with
-              | [], [] -> env, varlist
+              | [], [] -> env, varlist, el'
               | _, [] -> raise (Error (loc, "not enough values to unpack"))
               | [], _ -> raise (Error (loc, "too many values to unpack"))
               | (id :: iq), (t :: q) -> if eq_type t typ
@@ -346,11 +343,9 @@ and expr_desc env loc = function
                   end
                   else raise (Error (loc, type_error_message typ t))
             in
-            let env', varlist = instanciate env [] ids typ_list in
-            let expr_var_list = List.map evar varlist in
-            TEblock [{expr_desc=TEvars varlist; expr_typ=tvoid};
-              {expr_desc=TEassign (expr_var_list, el'); expr_typ=tvoid}], tvoid, env'
-      end
+            instanciate env [] ids typ_list
+      in
+      TEvars (varlist, assignlist), tvoid, env'
 
 (* evaluates a list of expression (including function calls with multiple return values) *)
 (* the wildcard flag allows the use of _ (in the left part of an assignation for instance) *)

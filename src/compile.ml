@@ -68,24 +68,34 @@ let compile_bool f =
   label l_true ++ movq (imm 1) (reg rdi) ++ label l_end
 
 let rec expr env e = match e.expr_desc with
-  | TEskip ->
-    nop
-  | TEconstant (Cbool true) ->
-    movq (imm 1) (reg rdi)
-  | TEconstant (Cbool false) ->
-    movq (imm 0) (reg rdi)
-  | TEconstant (Cint x) ->
-    movq (imm64 x) (reg rdi)
-  | TEnil ->
-    xorq (reg rdi) (reg rdi)
+  | TEskip -> nop
+  | TEconstant (Cbool true) -> movq (imm 1) (reg rdi)
+  | TEconstant (Cbool false) -> movq (imm 0) (reg rdi)
+  | TEconstant (Cint x) -> movq (imm64 x) (reg rdi)
+  | TEnil -> xorq (reg rdi) (reg rdi)
   | TEconstant (Cstring s) ->
-    (* TODO code pour constante string *) assert false 
-  | TEbinop (Band, e1, e2) ->
-    (* TODO code pour ET logique lazy *) assert false 
-  | TEbinop (Bor, e1, e2) ->
-    (* TODO code pour OU logique lazy *) assert false 
+      let label = alloc_string s in
+      movq (lab label) (reg rdi)
+
+  | TEbinop (Band | Bor as op, e1, e2) ->
+      expr env e1 ++
+      pushq (reg rdi) ++
+      expr env e2 ++
+      (if op = Band then andq else orq)
+        (ind rsp) (reg rdi) ++
+      popq rcx
+
   | TEbinop (Blt | Ble | Bgt | Bge as op, e1, e2) ->
-    (* TODO code pour comparaison ints *) assert false 
+      expr env e1 ++
+      pushq (reg rdi) ++
+      expr env e2 ++
+      cmpq (reg rdi) (ind rsp) ++
+      (function
+        | Blt -> setl | Ble -> setle
+        | Bgt -> setg | Bge -> setge) op
+        (reg dil) ++
+      popq rcx
+      
   | TEbinop (Badd | Bsub | Bmul | Bdiv | Bmod as op, e1, e2) ->
     (* TODO code pour arithmetique ints *) assert false 
   | TEbinop (Beq | Bne as op, e1, e2) ->

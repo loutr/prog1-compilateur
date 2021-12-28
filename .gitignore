@@ -3,3 +3,4 @@ src/pgoc
 src/.merlin
 *.dot
 *.svg
+*.s

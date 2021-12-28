@@ -23,7 +23,7 @@ test_category () {
 	    cat pgoc.log
 	    tput setaf 1; echo "-------------------"; tput setaf 7
 	fi
-	rm -f "${filename}_ast.dot" "${filename}_tast.dot"
+	rm -f "${filename}_ast.dot" "${filename}_tast.dot" "${filename}.s"
 	((total_count++))
     done
     echo "($(date)) SCORE FOR $1 TESTS: $success_count/$total_count" >> pgoc_results

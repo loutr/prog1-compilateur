@@ -12,6 +12,7 @@ let fmt_imported = ref true
 
 let dummy_loc = Lexing.dummy_pos, Lexing.dummy_pos
 exception Error of Ast.location * string
+exception Anomaly of string
 
 
 let tvoid = Tmany []
@@ -22,7 +23,7 @@ let rec printable_type = function
   | Tstring -> "string"
   | Tstruct structure -> structure.s_name
   | Tptrnil -> "<nil>"
-  | Twild -> raise (Invalid_argument "trying to print wildcard type")
+  | Twild -> "<wild>" (* for internal purpose only *)
   | Tptr typ -> "*" ^ (printable_type typ)
   | Tmany [] -> "instruction"
   | Tmany [t] -> printable_type t ^ " (·)"
@@ -44,7 +45,7 @@ let evar v = { expr_desc = TEident v; expr_typ = v.v_typ }
 let wildvar = {
   v_name = "_"; v_id = -1;
   v_loc = dummy_loc; v_typ = Twild;
-  v_depth = 0; v_used = true; v_addr = false
+  v_depth = 0; v_used = true; v_addr = 0 
 }
              
 
@@ -53,7 +54,7 @@ let new_var =
   fun x loc ?(depth=0) ?(used=false) ty ->
     incr id;
     { v_name = x; v_id = !id; v_loc = loc; v_typ = ty;
-      v_depth = depth; v_used = used; v_addr = false }
+      v_depth = depth; v_used = used; v_addr = 0}
 
 module Env = struct
   type e = {
@@ -370,13 +371,28 @@ let phase1 structures = function
   | PDstruct {ps_name = {id; loc}; _} ->
       if M.mem id structures
         then raise (Error (loc, "structure '" ^ id ^ "' already defined"))
-        else M.add id {s_name=id; s_fields=(Hashtbl.create 5)} structures
+        else M.add id {s_name=id;
+          s_fields=(Hashtbl.create 5); s_size=0} structures
   | PDfunction _ -> structures
 
 let sizeof = function
   | Tint | Tbool | Tstring | Tptr _ -> 8
-  | _ -> (* TODO *) assert false 
+  | Tstruct s -> s.s_size
+  | t -> raise (Anomaly
+      ("evaluating size of '" ^ printable_type t ^ "'"))
 
+(* recursively computes size and offset of a structure and
+   its fields *)
+let rec define_sizeof s =
+  s.s_size <- Hashtbl.fold define_ofs s.s_fields 0
+
+and define_ofs field_key ({f_typ} as field) acc =
+  field.f_ofs <- acc; if sizeof f_typ = 0 
+    then begin match f_typ with
+      | Tstruct s -> define_sizeof s
+      | t -> () (* cannot happen *)
+    end;
+    acc + (sizeof f_typ)
 
 (* returns a list of typed parameters for a given function, as a list of vars *)
 let rec build_parameters structures f_name used_names = function
@@ -454,6 +470,15 @@ let decl structures functions = function
 
   | PDstruct {ps_name={id}} ->
     let s = M.find id structures in
+    define_sizeof s;
+    (* debug to print information on structures *)
+    if !debug then begin
+      print_string ("structure '" ^ id ^ "' has size "
+        ^ string_of_int (sizeof (Tstruct s)) ^ "\n");
+      Hashtbl.iter (fun key -> fun {f_name; f_ofs} ->
+        print_string ("\tfield '" ^ f_name ^ "' has offset "
+          ^ string_of_int f_ofs ^ "\n")) s.s_fields
+    end;
     TDstruct s
 
 (* local variables (functions, structures) are used to represent context *)

@@ -52,6 +52,9 @@ let () =
         report_loc l;
         eprintf "error: %s\n@." msg;
         exit 1
+    | Typing.Anomaly msg ->
+        eprintf "Typing Anomaly: %s\n@." msg;
+        exit 2
     | Rewrite.Error msg ->
         eprintf "Rewrite Anomaly: %s\n@." msg;
         exit 2

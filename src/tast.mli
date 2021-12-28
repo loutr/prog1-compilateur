@@ -2,11 +2,8 @@
 (* arbres issus du typeur *)
 
 type unop = Ast.unop
-
 type binop = Ast.binop
-
 type constant = Ast.constant
-
 type incdec = Ast.incdec
 
 type function_ = {
@@ -15,9 +12,16 @@ type function_ = {
      fn_typ: typ list;
 }
 
+and field = {
+         f_name: string;
+          f_typ: typ;
+  mutable f_ofs: int;       (* memory offset inside structure *)
+}
+
 and structure = {
           s_name: string;
         s_fields: (string, field) Hashtbl.t;
+  mutable s_size: int;
 }
 
 and typ =
@@ -30,24 +34,18 @@ and typ =
 
 and var = {
           v_name: string;
-            v_id: int; (* unique *)
+            v_id: int;      (* unique *)
            v_loc: Ast.location;
            v_typ: typ;
          v_depth: int;
   mutable v_used: bool;
-  mutable v_addr: bool; (* usage de &x *)
-  (* TODO autres informations pour la production de code *)
+  mutable v_addr: int;     (* address relative to frame pointer *)
 }
 
-and field = {
-         f_name: string;
-          f_typ: typ;
-  mutable f_ofs: int; (* relatif à l'adresse de l'objet *)
+and expr = {
+  expr_desc: expr_desc;
+   expr_typ: typ; 
 }
-
-and expr =
-  { expr_desc: expr_desc;
-    expr_typ : typ; }
 
 and expr_desc =
   | TEskip
@@ -70,6 +68,6 @@ and expr_desc =
 
 type tdecl =
   | TDfunction of function_ * expr
-  | TDstruct   of structure
+  | TDstruct of structure
 
 type tfile = tdecl list

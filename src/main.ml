@@ -58,6 +58,9 @@ let () =
     | Rewrite.Error msg ->
         eprintf "Rewrite Anomaly: %s\n@." msg;
         exit 2
+    | Compile.Anomaly msg ->
+        eprintf "Compile Anomaly: %s\n@." msg;
+        exit 2
     | e ->
         eprintf "Anomaly: %s\n@." (Printexc.to_string e);
         exit 2

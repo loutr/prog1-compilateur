@@ -130,17 +130,10 @@ type env = {
 }
 
 let addv env = env.nb_locals <- env.nb_locals + 1
-
+let copy { ofs_this; nb_locals } = { ofs_this; nb_locals }
 let empty_env nargs =
   { nb_locals = 0; ofs_this = nargs }
 
-(* f reçoit le label correspondant à ``renvoyer vrai'' *)
-(* what is the purpose of this function? *)
-let compile_bool f =
-  let l_true = new_label () and l_end = new_label () in
-  f l_true ++
-  movq (imm 0) (reg rdi) ++ jmp l_end ++
-  label l_true ++ movq (imm 1) (reg rdi) ++ label l_end
 
 (* code to compare values. One of them must be
    within a register (cmpq cannot operate on two
@@ -148,7 +141,7 @@ let compile_bool f =
 let compare typ val1 val2 = match typ with
   | Tstruct s ->
       leaq val1 rsi ++ leaq val2 rdi ++
-      movl (imm s.s_size) (reg edx) ++ call "memcp"
+      movq (imm s.s_size) (reg rdx) ++ call "memcp"
   | Tstring ->
       leaq val1 rsi ++ leaq val2 rdi ++
       call "strcmp"
@@ -172,9 +165,8 @@ let rec expr_print left_spacing env = function
       ++ movq (reg rax) (reg rsi) ++ call (print_correspondance e.expr_typ) ++
       expr_print true env el
       
-      
 
-(* associates a *l-value* to its runtime address *)
+(* associates an *l-value* to its runtime address *)
 and expr_address env {expr_desc=desc; expr_typ=typ} = match desc, typ with
   | TEident v, (Tstruct _ | Tstring) ->
       movq (ind ~ofs:(8 * v.v_addr) rbp) (reg rax)
@@ -183,6 +175,7 @@ and expr_address env {expr_desc=desc; expr_typ=typ} = match desc, typ with
   | TEunop (Ustar, e), _ -> expr env e
   | _ -> raise (Anomaly "trying to find the runtime address of something\
       which is not an l-value")
+
 
 and expr env e = match e.expr_desc with
   | TEskip -> nop
@@ -233,56 +226,85 @@ and expr env e = match e.expr_desc with
       popq rcx
 
   | TEunop (Uneg, e1) -> expr env e1 ++ negq (reg rax)
-  | TEunop (Unot, e1) -> expr env e1 ++ notq (reg rax)
+  | TEunop (Unot, e1) -> expr env e1 ++ notq (reg rax) ++ andq (imm 1) (reg rax)
 
   | TEunop (Uamp, e1) -> expr_address env e1 
 
   | TEunop (Ustar, e1) ->
       expr env e1 ++ (match e1.expr_typ with
-        | Tptr (Tstruct _ | Tstring) -> nop
+        | Tptr (Tstruct _) -> nop (* NOTE should string* be considered there? I don't think so *)
         | _ -> movq (ind rax) (reg rax)
       )
 
-  | TEprint el -> add_print_capability Tstring;
-      expr_print false env el
+  | TEprint el -> add_print_capability Tstring; expr_print false env el
       
-  | TEident x ->
-    (* TODO code pour x *) assert false 
-  | TEassign (lvl, el) ->
-     assert false
-  | TEblock el ->  (* NOTE temporary *)
-      expr_list env el
-  | TEif (e1, e2, e3) ->
-     (* TODO code pour if *) assert false
-  | TEfor (e1, e2) ->
-     (* TODO code pour for *) assert false
-  | TEnew ty ->
-     (* TODO code pour new S *) assert false
-  | TEcall (f, el) ->
-      subq (imm (List.length f.fn_typ)) (reg rsp) ++
-      expr_list env el ++ call ("F_" ^ f.fn_name)
-  | TEdot (e1, {f_ofs=ofs}) ->
-     (* TODO code pour e.f *) assert false
-  | TEvars _ ->
-     assert false (* fait dans block *)
-  | TEreturn el ->
-    (* TODO code pour return e *) assert false
-  | TEincdec (e1, op) ->
-    (* TODO code pour return e++, e-- *) assert false
-    (* NOTE si on pouvait s'attendre facilement à ce que ce soit une variable sur la pile,
-       on pourrait faire directement opquiincremente (%registreapproprié)
-       mais la l-value opérande peut avoir une téte bizarre, qu'il est nécessaire de
-       déterminer en plusieurs étapes (ou alors il faut sérieusement optimiser la chose) *)
+  | TEident x -> movq (ind ~ofs:x.v_addr rbp) (reg rax)
 
-(* evaluates a list of expression and puts them successively on the stack (in reverse order).
-   For instance, it is used to prepare function arguments or variable assignation. *)
-and expr_list env = function
-  | [] -> nop
-  | e :: el' -> expr env e ++ expr_list env el' 
+  | TEassign (lvl, el) -> expr_stack env el ++ List.fold_left (fun d lv -> (match lv.expr_typ with
+        | Tstruct s -> expr_address env lv  ++ popq rsi ++ movq (reg rax) (reg rdi) ++
+            movq (imm s.s_size) (reg rdx) ++ call "memcpy"
+        | Twild -> popq rsi
+        | _ -> expr_address env lv  ++ popq rsi ++ movq (reg rsi) (ind rax)
+      ) ++ d)
+        nop lvl
+      (* NOTE what about using free to remove useless temporary structures ? *)
+      
+  | TEblock el -> let env' = copy env and nb_glob = env.nb_locals in
+      List.fold_left (++) nop (List.map (expr env) el) ++    
+      (if env'.nb_locals > nb_glob
+        then addq (imm ((env'.nb_locals - nb_glob) * 8)) (reg rsp)
+        else nop)
 
-and expr_list_rev env = function
+  | TEif (b, e1, e2) -> let l_end = new_label () and l_false = new_label () in
+      expr env b ++ cmpq (imm 0) (reg rax) ++ je l_false ++
+      expr env e1 ++ jmp l_end ++
+      label l_false ++ expr env e2
+
+  | TEfor (b, e) -> let l_cond = new_label () and l_begin = new_label () in
+      jmp l_cond ++ label l_begin ++ expr env e ++
+      label l_cond ++ expr env b ++ cmpq (imm 1) (reg rax) ++ jne l_begin
+
+  | TEnew ty -> malloc (sizeof ty) 
+
+  | TEcall (f, el) -> expr_stack env el ++ call ("F_" ^ f.fn_name)
+
+  | TEdot _ -> expr_address env e ++ (match e.expr_typ with
+        | Tstruct _ -> nop
+        | _ -> movq (ind rax) (reg rax)
+      )
+
+  | TEvars (varlist, initlist) ->
+      List.iter (fun var -> addv env; var.v_addr <- env.nb_locals) varlist;
+      expr_stack env (List.rev initlist)
+
+  | TEreturn el -> 
+      (* NOTE this is incorrect when the evaluations have side-effects, because the elements
+      are evaluated in reverse order, which does not match the semantics *)
+      expr_stack env el ++ (List.fold_left (++) nop (List.mapi (fun i _ ->
+        popq rax ++ movq (reg rax) (ind ~ofs:(8 * i) rbp)) el)) ++ ret
+
+  | TEincdec (e1, op) -> expr_address env e1 ++
+      (if op = Inc then incq else decq) (ind rax)
+    (* NOTE optimisations are possible when e1 is more specific, like TEident.
+       In that case, a command like incq -16(%rbp). This has not been done here
+       and is beyond the scope of this project. *)
+
+
+(* evaluates all expressions and put them on the stack in reverse order of appearance.
+   This function is used within TEassign, TEvars and function calls *)
+(* structures need to be copied when evaluated, as to allow x, y = y, x *)
+and expr_stack env = function
   | [] -> nop
-  | e :: el' -> expr_list env el' ++ expr env e
+  | ({ expr_desc = TEcall (f, _) } as e) :: el' -> 
+      expr_stack env el' ++ subq (imm (8 * (List.length f.fn_typ))) (reg rsp) ++ expr env e
+  | e :: el' -> expr_stack env el' ++ expr env e ++ (match e.expr_typ with
+      | Tstruct s ->
+          movq (reg rax) (reg r10) ++ malloc (s.s_size) ++ 
+          movq (reg rax) (reg rdi) ++ movq (reg r10) (reg rsi) ++
+          movq (imm s.s_size) (reg rdx) ++ call "memcpy"
+      | _ -> nop)
+
+
 
 let function_ f e =
   if !debug then eprintf "function %s:@." f.fn_name;

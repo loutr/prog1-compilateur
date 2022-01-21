@@ -1,4 +1,5 @@
 package main
+import "fmt"
 
 func foo(x int) (int, int) {
 	return x, x+1
@@ -11,4 +12,5 @@ func bar(x int, y int) int {
 func main() {
 	x := bar(foo(3))
 	x++
+	fmt.Print(x)
 }

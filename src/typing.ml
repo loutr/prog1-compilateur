@@ -54,7 +54,7 @@ let new_var =
   fun x loc ?(depth=0) ?(used=false) ty ->
     incr id;
     { v_name = x; v_id = !id; v_loc = loc; v_typ = ty;
-      v_depth = depth; v_used = used; v_addr = 0}
+      v_depth = depth; v_used = used; v_addr = 0 }
 
 module Env = struct
   type e = {
@@ -233,7 +233,7 @@ and expr_desc env loc = function
   | PEfor (b, e) ->
       let e', _ = expr env e and b', _ = expr env b in
       begin match e'.expr_typ, b'.expr_typ with
-        | Tmany [], Tbool -> TEfor (e', b'), tvoid, env
+        | Tmany [], Tbool -> TEfor (b', e'), tvoid, env
         | _, Tbool -> raise (Error (loc, "syntax error"))
         | _, t -> raise (Error (b.pexpr_loc, type_error_message Tbool t))
       end
@@ -395,15 +395,15 @@ and define_ofs field_key ({f_typ} as field) acc =
     acc + (sizeof f_typ)
 
 (* returns a list of typed parameters for a given function, as a list of vars *)
-let rec build_parameters structures f_name used_names = function
+let rec build_parameters structures f_name used_names counter = function
   | [] -> []
   | ({id; loc}, ptyp) :: q -> if List.mem id used_names
       then raise (Error (loc, "function '" ^ f_name ^
         "': redefinition of parameter '" ^ id ^ "'"))
       else begin
         let typ = find_type structures ptyp in
-        let v = new_var id loc typ ~used:true in
-        v :: build_parameters structures f_name (id :: used_names) q
+        let v = new_var id loc typ ~used:true in v.v_addr <- 8 * counter;
+        v :: build_parameters structures f_name (id :: used_names) (counter + 1) q
       end
 
 (* type and add a list of fields to a given structure *)
@@ -426,7 +426,8 @@ let phase2 structures functions = function
       if id = "main" && pl = [] && tyl = [] then found_main := true;
       if M.mem id functions
         then raise (Error (loc, "function '" ^ id ^ "' already defined"));
-      let fn_params = build_parameters structures id [] pl in
+  (* why 2? both return address and previous %rbp value are on the stack *)
+      let fn_params = build_parameters structures id [] 2 pl in
       let fn_typ = List.map (find_type structures) tyl in
       M.add id {fn_name=id; fn_params; fn_typ} functions
 

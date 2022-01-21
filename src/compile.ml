@@ -1,29 +1,3 @@
-(* étiquettes
-     F_function      entrée fonction
-     E_function      sortie fonction
-     L_xxx           sauts
-     S_xxx           chaîne
-
-   expression calculée avec la pile si besoin, résultat final dans %rdi
-
-   fonction : arguments sur la pile, résultat dans %rax ou sur la pile
-
-            res k
-            ...
-            res 1
-            arg n
-            ...
-            arg 1
-            adr. retour
-   rbp ---> ancien rbp
-            ...
-            var locales
-            ...
-            calculs
-   rsp ---> ...
-
-*)
-
 open Format
 open Ast
 open Tast
@@ -69,26 +43,25 @@ let print_correspondance = function
 (* Builds the print function for a given type. *)
 (* the functions expect their arguments in %rsi *)
 let print_functions = Hashtbl.create 5
-let rec add_print_capability typ = if not (Hashtbl.mem print_functions typ) then
-  Hashtbl.add print_functions typ (match typ with
+let rec add_print_capability typ = if not (Hashtbl.mem print_functions (print_correspondance typ)) then
+  Hashtbl.add print_functions (print_correspondance typ) (match typ with
     | Tstring -> let s_string = alloc_string "%s" in
-        label "P_string" ++ movq (ilab s_string) (reg rdi) ++ printf_frame
+        movq (ilab s_string) (reg rdi) ++ printf_frame
 
     | Tint -> let s_int = alloc_string "%ld" in
-        label "P_int" ++ movq (ilab s_int) (reg rdi) ++ printf_frame
+        movq (ilab s_int) (reg rdi) ++ printf_frame
 
     | Tbool -> add_print_capability Tstring;
         let true_s = alloc_string "true" and false_s = alloc_string "false"
         and l = new_label () and l' = new_label () in
-        label "P_bool" ++ cmpq (imm 0) (reg rsi) ++ je l
+        cmpq (imm 0) (reg rsi) ++ je l
         ++ movq (ilab true_s) (reg rsi) ++ jmp l'
         ++ label l ++ movq (ilab false_s) (reg rsi)
         ++ label l' ++ call "P_string" ++ ret
 
     | Tstruct s -> add_print_capability Tstring;
         let ocb_s = alloc_string "{" and ccb_s = alloc_string "}" in
-        label ("P_" ^ s.s_name) ++ movq (reg rsi) (reg r10)
-        ++ movq (ilab ocb_s) (reg rsi) ++ call "P_string" ++
+        movq (reg rsi) (reg r10) ++ movq (ilab ocb_s) (reg rsi) ++ call "P_string" ++
         (Hashtbl.fold (fun _ f d -> add_print_capability f.f_typ;
           (match f.f_typ with
             | Tbool -> movq (ind ~ofs:f.f_ofs r10) (reg rsi) ++ call "P_bool"
@@ -105,7 +78,7 @@ let rec add_print_capability typ = if not (Hashtbl.mem print_functions typ) then
     | Tptr _ | Tptrnil -> add_print_capability Tstring;
         let nil_s = alloc_string "<nil>" and s_addr = alloc_string "0x%08x"
         and l = new_label () in
-        label "P_ptr" ++ cmpq (imm 0) (reg rsi) ++ jne l
+        cmpq (imm 0) (reg rsi) ++ jne l
         ++ movq (ilab nil_s) (reg rsi) ++ call "P_string" ++ ret
         ++ label l ++ movq (ilab s_addr) (reg rdi) ++ printf_frame
 
@@ -115,15 +88,6 @@ let rec add_print_capability typ = if not (Hashtbl.mem print_functions typ) then
 let malloc n = movq (imm n) (reg rdi) ++ call "malloc"
 let sizeof = Typing.sizeof
 
-(* type proposé dans le sujet
-type env = {
-  exit_label: string;
-  ofs_this: int;
-  mutable nb_locals: int; (* maximum *)
-  next_local: int; (* 0, 1, ... *)
-}
-*)
-
 type env = {
   ofs_this: int;
   mutable nb_locals: int;
@@ -131,8 +95,7 @@ type env = {
 
 let addv env = env.nb_locals <- env.nb_locals + 1
 let copy { ofs_this; nb_locals } = { ofs_this; nb_locals }
-let empty_env nargs =
-  { nb_locals = 0; ofs_this = nargs }
+let empty_env nargs = { nb_locals = 0; ofs_this = nargs }
 
 
 (* code to compare values. One of them must be
@@ -148,12 +111,15 @@ let compare typ val1 val2 = match typ with
   | _ -> cmpq val1 val2 ++ sete (reg al) ++ movzbq (reg al) rax
 
 
-(* code to print a list of expressions *)
+(* code to print a list of expressions provided in order on the stack *)
 (* 2 specific behaviours to match Go's:
   * strings do not yield surrounding spaces, other types do
   * pointers to structures are of the form &<print result of the associated structure>
 *)
-(* NOTE this version of the function does not handle functions with multiple return values *)
+(* NOTE this version of the function does not handle functions *)
+(* IDEA: separating part of expr_stack which does stack substraction as a separate function,
+   to be used here. Justification: this is the only "ad-hoc" "function" which generates command
+   on the fly based on parameter list *)
 let rec expr_print left_spacing env = function
   | [] -> nop
   | ({ expr_typ = Tstring } as e) :: el -> expr env e
@@ -167,10 +133,10 @@ let rec expr_print left_spacing env = function
       
 
 (* associates an *l-value* to its runtime address *)
-and expr_address env {expr_desc=desc; expr_typ=typ} = match desc, typ with
+and expr_address env { expr_desc=desc; expr_typ=typ } = match desc, typ with
   | TEident v, (Tstruct _ | Tstring) ->
       movq (ind ~ofs:(8 * v.v_addr) rbp) (reg rax)
-  | TEident v, _ -> leaq (ind ~ofs:(8 * v.v_addr) rbp) rax
+  | TEident v, _ -> leaq (ind ~ofs:(v.v_addr) rbp) rax
   | TEdot (e, f), _ -> expr_address env e ++ addq (imm f.f_ofs) (reg rax)
   | TEunop (Ustar, e), _ -> expr env e
   | _ -> raise (Anomaly "trying to find the runtime address of something\
@@ -188,15 +154,13 @@ and expr env e = match e.expr_desc with
       movq (ilab label) (reg rax)
 
   | TEbinop (Band | Bor as op, e1, e2) ->
-      expr env e1 ++ pushq (reg rax) ++
-      expr env e2 ++
+      expr env e1 ++ pushq (reg rax) ++ expr env e2 ++
       (if op = Band then andq else orq)
         (ind rsp) (reg rax) ++
       popq rcx
 
   | TEbinop (Blt | Ble | Bgt | Bge as op, e1, e2) ->
-      expr env e1 ++ pushq (reg rax) ++
-      expr env e2 ++
+      expr env e1 ++ pushq (reg rax) ++ expr env e2 ++
       cmpq (reg rax) (ind rsp) ++
       (function
         | Blt -> setl | Ble -> setle
@@ -205,16 +169,14 @@ and expr env e = match e.expr_desc with
       popq rcx
       
   | TEbinop (Badd | Bsub | Bmul as op, e1, e2) ->
-      expr env e2 ++ pushq (reg rax) ++
-      expr env e1 ++ 
+      expr env e2 ++ pushq (reg rax) ++ expr env e1 ++ 
       (function
         | Badd -> addq | Bsub -> subq
         | _ -> imulq) op (ind rsp) (reg rax) ++
       popq rcx
 
   | TEbinop (Bdiv | Bmod as op, e1, e2) ->
-      expr env e1 ++ pushq (reg rax) ++
-      expr env e2 ++ movq (reg rax) (reg rax) ++
+      expr env e1 ++ pushq (reg rax) ++ expr env e2 ++ movq (reg rax) (reg rax) ++
       cqto ++ idivq (ind rsp) ++
       movq (reg (if Bdiv = op then rdx else rax)) (reg rax)
 
@@ -250,7 +212,8 @@ and expr env e = match e.expr_desc with
       (* NOTE what about using free to remove useless temporary structures ? *)
       
   | TEblock el -> let env' = copy env and nb_glob = env.nb_locals in
-      List.fold_left (++) nop (List.map (expr env) el) ++    
+      let t1 = List.fold_left (++) nop (List.map (expr env') el) in
+      t1 ++ (* haha! evaluation order is not left-to-right! *)
       (if env'.nb_locals > nb_glob
         then addq (imm ((env'.nb_locals - nb_glob) * 8)) (reg rsp)
         else nop)
@@ -258,15 +221,19 @@ and expr env e = match e.expr_desc with
   | TEif (b, e1, e2) -> let l_end = new_label () and l_false = new_label () in
       expr env b ++ cmpq (imm 0) (reg rax) ++ je l_false ++
       expr env e1 ++ jmp l_end ++
-      label l_false ++ expr env e2
+      label l_false ++ expr env e2 ++ label l_end
 
   | TEfor (b, e) -> let l_cond = new_label () and l_begin = new_label () in
       jmp l_cond ++ label l_begin ++ expr env e ++
-      label l_cond ++ expr env b ++ cmpq (imm 1) (reg rax) ++ jne l_begin
+      label l_cond ++ expr env b ++ cmpq (imm 1) (reg rax) ++ je l_begin
 
   | TEnew ty -> malloc (sizeof ty) 
 
-  | TEcall (f, el) -> expr_stack env el ++ call ("F_" ^ f.fn_name)
+  | TEcall (f, el) -> ev_fun env (f, el) ++ begin match (List.length f.fn_typ) with
+        | 0 -> nop
+        | 1 -> popq rax
+        | _ -> raise (Anomaly "trying to evaluate invalid function within an expression")
+      end
 
   | TEdot _ -> expr_address env e ++ (match e.expr_typ with
         | Tstruct _ -> nop
@@ -274,14 +241,14 @@ and expr env e = match e.expr_desc with
       )
 
   | TEvars (varlist, initlist) ->
-      List.iter (fun var -> addv env; var.v_addr <- env.nb_locals) varlist;
+      List.iter (fun var -> addv env; var.v_addr <- -8 * env.nb_locals) varlist;
       expr_stack env (List.rev initlist)
 
   | TEreturn el -> 
       (* NOTE this is incorrect when the evaluations have side-effects, because the elements
       are evaluated in reverse order, which does not match the semantics *)
       expr_stack env el ++ (List.fold_left (++) nop (List.mapi (fun i _ ->
-        popq rax ++ movq (reg rax) (ind ~ofs:(8 * i) rbp)) el)) ++ ret
+        popq rax ++ movq (reg rax) (ind ~ofs:(env.ofs_this + 8 * i) rbp)) el)) ++ leave ++ ret
 
   | TEincdec (e1, op) -> expr_address env e1 ++
       (if op = Inc then incq else decq) (ind rax)
@@ -290,44 +257,51 @@ and expr env e = match e.expr_desc with
        and is beyond the scope of this project. *)
 
 
-(* evaluates all expressions and put them on the stack in reverse order of appearance.
+(* evaluates a list of expressions and put the results on the stack in reverse order of appearance.
    This function is used within TEassign, TEvars and function calls *)
-(* structures need to be copied when evaluated, as to allow x, y = y, x *)
 and expr_stack env = function
   | [] -> nop
-  | ({ expr_desc = TEcall (f, _) } as e) :: el' -> 
-      expr_stack env el' ++ subq (imm (8 * (List.length f.fn_typ))) (reg rsp) ++ expr env e
+  | { expr_desc = TEcall (f, arglist) } :: el' -> 
+      expr_stack env el' ++ ev_fun env (f, arglist)
   | e :: el' -> expr_stack env el' ++ expr env e ++ (match e.expr_typ with
-      | Tstruct s ->
+      | Tstruct s -> (* structures need to be copied when evaluated, as to allow x, y = y, x *)
           movq (reg rax) (reg r10) ++ malloc (s.s_size) ++ 
           movq (reg rax) (reg rdi) ++ movq (reg r10) (reg rsi) ++
           movq (imm s.s_size) (reg rdx) ++ call "memcpy"
-      | _ -> nop)
+      | _ -> nop) ++ pushq (reg rax)
+
+(* calls a function and leave the results on the stack *)
+and ev_fun env (f, arglist) =
+  subq (imm (8 * (List.length f.fn_typ))) (reg rsp) ++
+  expr_stack env arglist ++ call ("F_" ^ f.fn_name) ++
+  (* function arguments must be removed from the stack once the call is done *)
+  (if arglist = [] then nop else addq (imm (8 * (List.length arglist))) (reg rsp))
+
 
 
 
 let function_ f e =
   if !debug then eprintf "function %s:@." f.fn_name;
-  let env = empty_env (List.length f.fn_params) in
-  label ("F_" ^ f.fn_name) ++ expr env e
+  (* why 2? both return address and previous %rbp value are on the stack *)
+  let env = empty_env (8 * (2 + (List.length f.fn_params))) in
+  label ("F_" ^ f.fn_name) ++ pushq (reg rbp) ++ movq (reg rsp) (reg rbp) ++
+  expr env e ++ (if f.fn_typ = [] then leave ++ ret else nop)
 
 let decl code = function
-  | TDfunction (f, e) -> code ++ function_ f e ++ ret
+  | TDfunction (f, e) -> code ++ function_ f e
   | TDstruct _ -> code
 
 let file ?debug:(b=false) dl =
   debug := b;
   let funs = List.fold_left decl nop dl in
-  let print_funs = Hashtbl.fold (fun _ s d -> s ++ d) print_functions nop in
+  let print_funs = Hashtbl.fold (fun l s d -> label l ++ s ++ d) print_functions nop in
   { text =
       globl "main" ++ label "main" ++
       call "F_main" ++
       xorq (reg rax) (reg rax) ++
       ret ++
       funs ++ print_funs
-; (* TODO print pour d'autres valeurs *)
-   (* TODO appel malloc de stdlib *)
-    data =
-      (Hashtbl.fold (fun l s d -> label l ++ string s ++ d) strings nop)
+    ;
+    data = (Hashtbl.fold (fun l s d -> label l ++ string s ++ d) strings nop)
     ;
   }

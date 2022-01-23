@@ -134,7 +134,7 @@ let rec expr_print left_spacing env = function
 
 (* associates an *l-value* to its runtime address *)
 and expr_address env { expr_desc=desc; expr_typ=typ } = match desc, typ with
-  | TEident v, (Tstruct _ | Tstring) ->
+  | TEident v, Tstruct _ ->
       movq (ind ~ofs:v.v_addr rbp) (reg rax)
   | TEident v, _ -> leaq (ind ~ofs:v.v_addr rbp) rax
   | TEdot (e, f), _ -> begin match e.expr_typ with
@@ -197,7 +197,7 @@ and expr env e = match e.expr_desc with
 
   | TEunop (Ustar, e1) ->
       expr env e1 ++ (match e1.expr_typ with
-        | Tptr (Tstruct _) -> nop (* NOTE should string* be considered there? I don't think so *)
+        | Tptr (Tstruct _) -> nop
         | _ -> movq (ind rax) (reg rax)
       )
 
@@ -205,18 +205,17 @@ and expr env e = match e.expr_desc with
       
   | TEident x -> movq (ind ~ofs:x.v_addr rbp) (reg rax)
 
-  | TEassign (lvl, el) -> expr_stack env el ++ List.fold_left (fun d lv -> (match lv.expr_typ with
-        | Tstruct s -> expr_address env lv  ++ popq rsi ++ movq (reg rax) (reg rdi) ++
+  | TEassign (lvl, el) -> expr_stack env el ++ List.fold_left (fun d lv -> d ++ (match lv.expr_typ with
+        | Tstruct s -> expr_address env lv ++ popq rsi ++ movq (reg rax) (reg rdi) ++
             movq (imm s.s_size) (reg rdx) ++ call "memcpy"
         | Twild -> popq rsi
-        | _ -> expr_address env lv  ++ popq rsi ++ movq (reg rsi) (ind rax)
-      ) ++ d)
-        nop lvl
+        | _ -> expr_address env lv ++ popq rsi ++ movq (reg rsi) (ind rax)
+      )) nop lvl
       (* NOTE what about using free to remove useless temporary structures ? *)
       
   | TEblock el -> let env' = copy env and nb_glob = env.nb_locals in
       let t1 = List.fold_left (++) nop (List.map (expr env') el) in
-      t1 ++ (* haha! evaluation order is not left-to-right! *)
+      t1 ++ (* haha! ++ evaluation order is not left-to-right! *)
       (if env'.nb_locals > nb_glob
         then addq (imm ((env'.nb_locals - nb_glob) * 8)) (reg rsp)
         else nop)
@@ -244,8 +243,8 @@ and expr env e = match e.expr_desc with
       )
 
   | TEvars (varlist, initlist) ->
-      List.iter (fun var -> addv env; var.v_addr <- -8 * env.nb_locals) varlist;
-      expr_stack env (List.rev initlist)
+      List.iter (fun var -> addv env; var.v_addr <- -8 * env.nb_locals) (List.rev varlist);
+      expr_stack env initlist
 
   | TEreturn el -> 
       (* NOTE this is incorrect when the evaluations have side-effects, because the elements

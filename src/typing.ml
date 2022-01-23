@@ -325,7 +325,8 @@ and expr_desc env loc = function
             
         | None, _ ->
             let rec instanciate env varlist ids l = match ids, l with
-              | [], [] -> env, varlist, el'
+              (* accumulated list is reversed in order to match that of initialisation values *)
+              | [], [] -> env, List.rev varlist, el'
               | _, [] -> raise (Error (loc, "not enough values to unpack"))
               | [], _ -> raise (Error (loc, "too many values to unpack"))
               | (id :: iq), (t :: q) ->
@@ -337,7 +338,7 @@ and expr_desc env loc = function
         | Some ptyp, _ ->
             let typ = find_type env.structures ptyp in
             let rec instanciate env varlist ids l = match ids, l with
-              | [], [] -> env, varlist, el'
+              | [], [] -> env, List.rev varlist, el'
               | _, [] -> raise (Error (loc, "not enough values to unpack"))
               | [], _ -> raise (Error (loc, "too many values to unpack"))
               | (id :: iq), (t :: q) -> if eq_type t typ

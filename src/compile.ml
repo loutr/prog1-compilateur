@@ -135,9 +135,12 @@ let rec expr_print left_spacing env = function
 (* associates an *l-value* to its runtime address *)
 and expr_address env { expr_desc=desc; expr_typ=typ } = match desc, typ with
   | TEident v, (Tstruct _ | Tstring) ->
-      movq (ind ~ofs:(8 * v.v_addr) rbp) (reg rax)
-  | TEident v, _ -> leaq (ind ~ofs:(v.v_addr) rbp) rax
-  | TEdot (e, f), _ -> expr_address env e ++ addq (imm f.f_ofs) (reg rax)
+      movq (ind ~ofs:v.v_addr rbp) (reg rax)
+  | TEident v, _ -> leaq (ind ~ofs:v.v_addr rbp) rax
+  | TEdot (e, f), _ -> begin match e.expr_typ with
+      | Tptr _ -> expr env e
+      | _ -> expr_address env e
+    end ++ addq (imm f.f_ofs) (reg rax)
   | TEunop (Ustar, e), _ -> expr env e
   | _ -> raise (Anomaly "trying to find the runtime address of something\
       which is not an l-value")

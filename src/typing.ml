@@ -310,13 +310,16 @@ and expr_desc env loc = function
       let el', typ_list = expr_list env el in
       let env', varlist, assignlist = match ptypo, el' with
         | Some ptyp, [] ->
-            let nilexpr = {expr_desc = TEnil; expr_typ = Tptrnil} in
             let typ = find_type env.structures ptyp in
+            let nilexpr = {expr_desc = TEnil; expr_typ = Tptrnil} in
+            (* NOTE: This works because structures and structure pointers are treated almost equally. *)
+            let newexpr = {expr_desc = TEnew typ; expr_typ = Tptrnil} in
             let rec instanciate env varlist assignlist = function 
               | [] -> env, varlist, assignlist
               | id :: iq ->
                   let env', v = Env.var id.id id.loc typ env in
-                  instanciate env' (v :: varlist) (nilexpr :: assignlist) iq
+                  instanciate env' (v :: varlist)
+                    ((match typ with Tstruct _ -> newexpr | _ -> nilexpr) :: assignlist) iq
             in
             instanciate env [] [] ids
             

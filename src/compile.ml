@@ -19,7 +19,6 @@ let alloc_string =
 let new_label =
   let r = ref 0 in fun () -> incr r; "L_" ^ string_of_int !r
 
-let ampersand_s = alloc_string "&"
 let space_s = alloc_string " "
 
 let printf_frame = inline
@@ -36,6 +35,7 @@ let print_correspondance = function
   | Tstring -> "P_string"
   | Tbool -> "P_bool"
   | Tint -> "P_int"
+  | Tptr (Tstruct s) -> "P_ptr_" ^ s.s_name
   | Tptr _ | Tptrnil -> "P_ptr"
   | Tstruct s -> "P_" ^ s.s_name
   | _ -> raise (Anomaly "could not yield print function for the given type")
@@ -61,22 +61,26 @@ let rec add_print_capability typ = if not (Hashtbl.mem print_functions (print_co
 
     | Tstruct s -> add_print_capability Tstring;
         let ocb_s = alloc_string "{" and ccb_s = alloc_string "}" in
-        movq (reg rsi) (reg r10) ++ movq (ilab ocb_s) (reg rsi) ++ call "P_string" ++
-        (Hashtbl.fold (fun _ f d -> add_print_capability f.f_typ;
+        movq (reg rsi) (reg r15) ++ movq (ilab ocb_s) (reg rsi) ++ call "P_string" ++
+        List.fold_left (fun d f ->  d ++
+          (if d = nop then nop else movq (ilab space_s) (reg rsi) ++ call "P_string") ++
           (match f.f_typ with
-            | Tbool -> movq (ind ~ofs:f.f_ofs r10) (reg rsi) ++ call "P_bool"
-            | Tint -> movq (ind ~ofs:f.f_ofs r10) (reg rsi) ++ call "P_int"
-            | Tptr _ | Tptrnil -> movq (ind ~ofs:f.f_ofs r10) (reg rsi) ++ call "P_ptr"
-            | Tstring -> leaq (ind ~ofs:f.f_ofs r10) rsi ++ call "P_string"
-            | Tstruct s -> leaq (ind ~ofs:f.f_ofs r10) rsi ++ call ("P_" ^ s.s_name)
-            | _ -> raise (Anomaly "could not yield print function for the given type")
-          ) ++
-          if d = nop then nop else movq (ilab space_s) (reg rsi) ++ call "P_string"
-        ) s.s_fields nop)
+            | Tstruct s -> add_print_capability f.f_typ; leaq (ind ~ofs:f.f_ofs r15) rsi ++ call ("P_" ^ s.s_name)
+            | Tptr _ -> add_print_capability Tptrnil; movq (ind ~ofs:f.f_ofs r15) (reg rsi) ++ call "P_ptr"
+            | _ -> add_print_capability f.f_typ; movq (ind ~ofs:f.f_ofs r15) (reg rsi) ++ call (print_correspondance f.f_typ)
+          )) nop s.s_ordered_fields
         ++ movq (ilab ccb_s) (reg rsi) ++ call "P_string" ++ ret
 
+    | Tptr (Tstruct s) -> add_print_capability Tstring; add_print_capability (Tstruct s);
+        let ampersand_s = alloc_string "&" and nil_s = alloc_string "<nil>" and l = new_label () in
+        cmpq (imm 0) (reg rsi) ++ jne l ++
+        movq (ilab nil_s) (reg rsi) ++ call "P_string" ++ ret ++ 
+        label l ++ movq (reg rsi) (reg r15) ++ 
+        movq (ilab ampersand_s) (reg rsi) ++ call "P_string" ++
+        movq (reg r15) (reg rsi) ++ call (print_correspondance (Tstruct s)) ++ ret
+
     | Tptr _ | Tptrnil -> add_print_capability Tstring;
-        let nil_s = alloc_string "<nil>" and s_addr = alloc_string "0x%08x"
+        let nil_s = alloc_string "<nil>" and s_addr = alloc_string "0x%010x"
         and l = new_label () in
         cmpq (imm 0) (reg rsi) ++ jne l
         ++ movq (ilab nil_s) (reg rsi) ++ call "P_string" ++ ret
@@ -85,7 +89,9 @@ let rec add_print_capability typ = if not (Hashtbl.mem print_functions (print_co
     | _ -> raise (Anomaly "could not build print function for the given type")
   )
 
-let malloc n = movq (imm n) (reg rdi) ++ call "malloc"
+let malloc n = movq (imm n) (reg rdi) ++ call "malloc" ++
+  movq (reg rax) (reg rdi) ++ movq (imm 0) (reg rsi) ++ movq (imm (n / 8)) (reg rdx) ++ call "memset"
+
 let sizeof = Typing.sizeof
 
 type env = {
@@ -116,7 +122,7 @@ let compare typ val1 val2 = match typ with
   * strings do not yield surrounding spaces, other types do
   * pointers to structures are of the form &<print result of the associated structure>
 *)
-(* NOTE this version of the function does not handle functions *)
+(* NOTE this version does not handle functions with multiple return values *)
 (* IDEA: separating part of expr_stack which does stack substraction as a separate function,
    to be used here. Justification: this is the only "ad-hoc" "function" which generates command
    on the fly based on parameter list *)
@@ -126,9 +132,8 @@ let rec expr_print left_spacing env = function
       ++ movq (reg rax) (reg rsi) ++ call "P_string"
       ++ expr_print false env el
   | e :: el -> add_print_capability e.expr_typ;
-      (if left_spacing then movq (ilab space_s) (reg rsi) ++ call "P_string" else nop)
-      ++ expr env e
-      ++ movq (reg rax) (reg rsi) ++ call (print_correspondance e.expr_typ) ++
+      (if left_spacing then movq (ilab space_s) (reg rsi) ++ call "P_string" else nop) ++
+      expr env e ++ movq (reg rax) (reg rsi) ++ call (print_correspondance e.expr_typ) ++
       expr_print true env el
       
 

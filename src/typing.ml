@@ -375,7 +375,7 @@ let phase1 structures = function
   | PDstruct {ps_name = {id; loc}; _} ->
       if M.mem id structures
         then raise (Error (loc, "structure '" ^ id ^ "' already defined"))
-        else M.add id {s_name=id;
+        else M.add id {s_name=id; s_ordered_fields = [];
           s_fields=(Hashtbl.create 5); s_size=0} structures
   | PDfunction _ -> structures
 
@@ -388,9 +388,9 @@ let sizeof = function
 (* recursively computes size and offset of a structure and
    its fields *)
 let rec define_sizeof s =
-  s.s_size <- Hashtbl.fold define_ofs s.s_fields 0
+  s.s_size <- List.fold_left define_ofs 0 s.s_ordered_fields
 
-and define_ofs field_key ({f_typ} as field) acc =
+and define_ofs acc ({f_typ} as field) =
   field.f_ofs <- acc; if sizeof f_typ = 0 
     then begin match f_typ with
       | Tstruct s -> define_sizeof s
@@ -410,16 +410,18 @@ let rec build_parameters structures f_name used_names counter = function
         v :: build_parameters structures f_name (id :: used_names) (counter + 1) q
       end
 
-(* type and add a list of fields to a given structure *)
+(* types and adds a list of fields to a given structure, returns the ordered
+   list of all fields. *)
 let rec add_fields structure_context structure used_names = function
-  | [] -> ()
+  | [] -> []
   | ({id; loc}, ptyp) :: q -> if List.mem id used_names
       then raise (Error (loc, "structure '" ^ structure.s_name ^
         "': redefinition of field '" ^ id ^ "'"))
       else begin
         let typ = find_type structure_context ptyp in
-        Hashtbl.add structure.s_fields id {f_name=id; f_typ=typ; f_ofs=0};
-        add_fields structure_context structure (id :: used_names) q
+        let field = {f_name=id; f_typ=typ; f_ofs=0} in
+        Hashtbl.add structure.s_fields id field;
+        field :: add_fields structure_context structure (id :: used_names) q
       end
 
 
@@ -437,7 +439,7 @@ let phase2 structures functions = function
 
   | PDstruct {ps_name = {id; _}; ps_fields} ->
       let s = M.find id structures in
-      add_fields structures s [] ps_fields;
+      s.s_ordered_fields <- add_fields structures s [] ps_fields;
       functions
 
 exception Cyclic of string * string
@@ -480,9 +482,9 @@ let decl structures functions = function
     if !debug then begin
       print_string ("structure '" ^ id ^ "' has size "
         ^ string_of_int (sizeof (Tstruct s)) ^ "\n");
-      Hashtbl.iter (fun key -> fun {f_name; f_ofs} ->
+      List.iter (fun {f_name; f_ofs} ->
         print_string ("\tfield '" ^ f_name ^ "' has offset "
-          ^ string_of_int f_ofs ^ "\n")) s.s_fields
+          ^ string_of_int f_ofs ^ "\n")) s.s_ordered_fields
     end;
     TDstruct s
 

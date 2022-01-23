@@ -19,9 +19,10 @@ and field = {
 }
 
 and structure = {
-          s_name: string;
-        s_fields: (string, field) Hashtbl.t;
-  mutable s_size: int;
+                    s_name: string;
+                  s_fields: (string, field) Hashtbl.t;
+  mutable s_ordered_fields: field list; (* ordered list of fields. Used in print schemes *)
+            mutable s_size: int;
 }
 
 and typ =

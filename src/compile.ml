@@ -21,15 +21,15 @@ let new_label =
 
 let space_s = alloc_string " "
 
-let printf_frame = inline
+(* calls to C functions must provide a 16-byte stack alignment *)
+let callc func = inline (
 "        pushq %rbp
         movq %rsp, %rbp
         andb $0xF0, %spl
         xorq %rax, %rax
-        call printf
+        call " ^ func ^ "
         leave
-        ret
-"
+")
 
 let print_correspondance = function
   | Tstring -> "P_string"
@@ -46,10 +46,10 @@ let print_functions = Hashtbl.create 5
 let rec add_print_capability typ = if not (Hashtbl.mem print_functions (print_correspondance typ)) then
   Hashtbl.add print_functions (print_correspondance typ) (match typ with
     | Tstring -> let s_string = alloc_string "%s" in
-        movq (ilab s_string) (reg rdi) ++ printf_frame
+        movq (ilab s_string) (reg rdi) ++ callc "printf" ++ ret
 
     | Tint -> let s_int = alloc_string "%ld" in
-        movq (ilab s_int) (reg rdi) ++ printf_frame
+        movq (ilab s_int) (reg rdi) ++ callc "printf" ++ ret
 
     | Tbool -> add_print_capability Tstring;
         let true_s = alloc_string "true" and false_s = alloc_string "false"
@@ -60,16 +60,16 @@ let rec add_print_capability typ = if not (Hashtbl.mem print_functions (print_co
         ++ label l' ++ call "P_string" ++ ret
 
     | Tstruct s -> add_print_capability Tstring;
-        let ocb_s = alloc_string "{" and ccb_s = alloc_string "}" in
-        movq (reg rsi) (reg r15) ++ movq (ilab ocb_s) (reg rsi) ++ call "P_string" ++
+        let ocb_s = alloc_string "{" and ccb_s = alloc_string "}" in pushq (reg r12) ++
+        movq (reg rsi) (reg r12) ++ movq (ilab ocb_s) (reg rsi) ++ call "P_string" ++
         List.fold_left (fun d f ->  d ++
           (if d = nop then nop else movq (ilab space_s) (reg rsi) ++ call "P_string") ++
           (match f.f_typ with
-            | Tstruct s -> add_print_capability f.f_typ; leaq (ind ~ofs:f.f_ofs r15) rsi ++ call ("P_" ^ s.s_name)
-            | Tptr _ -> add_print_capability Tptrnil; movq (ind ~ofs:f.f_ofs r15) (reg rsi) ++ call "P_ptr"
-            | _ -> add_print_capability f.f_typ; movq (ind ~ofs:f.f_ofs r15) (reg rsi) ++ call (print_correspondance f.f_typ)
+            | Tstruct s -> add_print_capability f.f_typ; leaq (ind ~ofs:f.f_ofs r12) rsi ++ call ("P_" ^ s.s_name)
+            | Tptr _ -> add_print_capability Tptrnil; movq (ind ~ofs:f.f_ofs r12) (reg rsi) ++ call "P_ptr"
+            | _ -> add_print_capability f.f_typ; movq (ind ~ofs:f.f_ofs r12) (reg rsi) ++ call (print_correspondance f.f_typ)
           )) nop s.s_ordered_fields
-        ++ movq (ilab ccb_s) (reg rsi) ++ call "P_string" ++ ret
+        ++ movq (ilab ccb_s) (reg rsi) ++ call "P_string" ++ popq r12 ++ ret
 
     | Tptr (Tstruct s) -> add_print_capability Tstring; add_print_capability (Tstruct s);
         let ampersand_s = alloc_string "&" and nil_s = alloc_string "<nil>" and l = new_label () in
@@ -84,13 +84,13 @@ let rec add_print_capability typ = if not (Hashtbl.mem print_functions (print_co
         and l = new_label () in
         cmpq (imm 0) (reg rsi) ++ jne l
         ++ movq (ilab nil_s) (reg rsi) ++ call "P_string" ++ ret
-        ++ label l ++ movq (ilab s_addr) (reg rdi) ++ printf_frame
+        ++ label l ++ movq (ilab s_addr) (reg rdi) ++ callc "printf" ++ ret
 
     | _ -> raise (Anomaly "could not build print function for the given type")
   )
 
-let malloc n = movq (imm n) (reg rdi) ++ call "malloc" ++
-  movq (reg rax) (reg rdi) ++ movq (imm 0) (reg rsi) ++ movq (imm (n / 8)) (reg rdx) ++ call "memset"
+let malloc n = movq (imm n) (reg rdi) ++ callc "malloc" ++
+  movq (reg rax) (reg rdi) ++ movq (imm 0) (reg rsi) ++ movq (imm (n / 8)) (reg rdx) ++ callc "memset"
 
 let sizeof = Typing.sizeof
 
@@ -104,17 +104,18 @@ let copy { ofs_this; nb_locals } = { ofs_this; nb_locals }
 let empty_env nargs = { nb_locals = 0; ofs_this = nargs }
 
 
-(* code to compare values. One of them must be
-   within a register (cmpq cannot operate on two
-   non-register values) *)
-let compare typ val1 val2 = match typ with
-  | Tstruct s ->
-      leaq val1 rsi ++ leaq val2 rdi ++
-      movq (imm s.s_size) (reg rdx) ++ call "memcp"
-  | Tstring ->
-      leaq val1 rsi ++ leaq val2 rdi ++
-      call "strcmp"
-  | _ -> cmpq val1 val2 ++ sete (reg al) ++ movzbq (reg al) rax
+(* code to compare values within rdi and rsi. *)
+(* beware of memcmp and strcmp behaviour. *)
+let compare typ = match typ with
+  | Tstruct s -> let l = new_label () and l' = new_label () in
+      movq (imm s.s_size) (reg rdx) ++ callc "memcmp" ++
+      cmpq (imm 0) (reg rax) ++ je l ++ movq (imm 0) (reg rax) ++ jmp l' ++
+      label l ++ movq (imm 1) (reg rax) ++ label l'
+  | Tstring -> let l = new_label () and l' = new_label () in
+      callc "strcmp" ++
+      cmpq (imm 0) (reg rax) ++ je l ++ movq (imm 0) (reg rax) ++ jmp l' ++
+      label l ++ movq (imm 1) (reg rax) ++ label l'
+  | _ -> cmpq (reg rsi) (reg rdi) ++ sete (reg al) ++ movzbq (reg al) rax
 
 
 (* code to print a list of expressions provided in order on the stack *)
@@ -184,16 +185,17 @@ and expr env e = match e.expr_desc with
       popq rcx
 
   | TEbinop (Bdiv | Bmod as op, e1, e2) ->
-      expr env e1 ++ pushq (reg rax) ++ expr env e2 ++ movq (reg rax) (reg rax) ++
+      expr env e2 ++ pushq (reg rax) ++ expr env e1 ++
       cqto ++ idivq (ind rsp) ++
-      movq (reg (if Bdiv = op then rdx else rax)) (reg rax)
+      movq (reg (if Bdiv = op then rax else rdx)) (reg rax) ++
+      popq rcx
 
   | TEbinop (Beq | Bne as op, e1, e2) ->
       expr env e1 ++ pushq (reg rax) ++
-      expr env e2 ++ movq (reg rax) (reg rbx) ++
-      compare e1.expr_typ (reg rbx) (ind rsp) ++
-      (if op = Beq then nop else notq (reg rax) ++ andq (imm 1) (reg rax)) ++
-      popq rcx
+      expr env e2 ++ movq (reg rax) (reg rdi) ++
+      popq rsi ++
+      compare e1.expr_typ ++
+      (if op = Beq then nop else notq (reg rax))
 
   | TEunop (Uneg, e1) -> expr env e1 ++ negq (reg rax)
   | TEunop (Unot, e1) -> expr env e1 ++ notq (reg rax) ++ andq (imm 1) (reg rax)
@@ -212,7 +214,7 @@ and expr env e = match e.expr_desc with
 
   | TEassign (lvl, el) -> expr_stack env el ++ List.fold_left (fun d lv -> d ++ (match lv.expr_typ with
         | Tstruct s -> expr_address env lv ++ popq rsi ++ movq (reg rax) (reg rdi) ++
-            movq (imm s.s_size) (reg rdx) ++ call "memcpy"
+            movq (imm s.s_size) (reg rdx) ++ callc "memcpy"
         | Twild -> popq rsi
         | _ -> expr_address env lv ++ popq rsi ++ movq (reg rsi) (ind rax)
       )) nop lvl
@@ -274,7 +276,7 @@ and expr_stack env = function
       | Tstruct s -> (* structures need to be copied when evaluated, as to allow x, y = y, x *)
           movq (reg rax) (reg r10) ++ malloc (s.s_size) ++ 
           movq (reg rax) (reg rdi) ++ movq (reg r10) (reg rsi) ++
-          movq (imm s.s_size) (reg rdx) ++ call "memcpy"
+          movq (imm s.s_size) (reg rdx) ++ callc "memcpy"
       | _ -> nop) ++ pushq (reg rax)
 
 (* calls a function and leave the results on the stack *)
